@@ -67,7 +67,6 @@ NOISE_TAGS = {
     "ConnectionsId", "SceneGridColor", "SceneBackgroundColor", "SceneSkybox",
     "MakeDefaultViewArea", "LimitNumberOfArrayElements", "ElementsLimitValue",
     "SamplesToKeep", "FreezeXAxis", "AutoUpdate", "RecurrenceProperties",
-    "OccurrenceAtTime", "OccurrenceDate", "OccurrenceTime", "RecurrenceCode",
     "AutoCreate", "DatasetsCreationProperties",
     "ColumnsCountCode", "RowsCountCode", "NeigborhoodType", "LayoutType",
     "NetworkType", "ConnectionsPerAgentCode", "ConnectionsRangeCode",
@@ -470,21 +469,52 @@ def parse_events(xml_path, java_path=None):
         props = find_child(ev, "Properties")
         trigger = props.get("TriggerType", "") if props is not None else ""
         mode = props.get("Mode", "") if props is not None else ""
-        timeout = ""
-        if props is not None:
-            t_el = find_child(props, "Timeout")
-            if t_el is not None:
-                timeout = code_value(t_el)
-            else:
-                # Cyclic event: RecurrenceCode holds the period
-                r_el = find_child(props, "RecurrenceCode")
-                if r_el is not None:
-                    timeout = code_value(r_el)
+        details = event_details(props, trigger, mode) if props is not None else []
         events.append({
-            "name": name, "trigger": trigger, "mode": mode, "timeout": timeout,
+            "name": name, "trigger": trigger, "mode": mode, "details": details,
             "body": bodies.get(eid, ""),
         })
     return events
+
+
+def event_details(props, trigger, mode):
+    """Pick the relevant (label, value) pairs from an Event's <Properties>.
+
+    Every <Event> carries all of the fields regardless of its TriggerType/Mode, so
+    only the ones that apply to the current combination are returned:
+      timeout/occuresOnce  → OccurrenceTime or OccurrenceDate (per OccurrenceAtTime)
+      timeout/userControls → Timeout
+      timeout/cyclic       → as occuresOnce, plus RecurrenceCode
+      rate                 → Rate
+      condition            → Condition"""
+    details = []
+
+    def occurrence():
+        at_time = cdata(find_child(props, "OccurrenceAtTime")).lower() == "true"
+        if at_time:
+            details.append(("First occurrence (model time)",
+                            unit_label(find_child(props, "OccurrenceTime"))))
+        else:
+            ms = cdata(find_child(props, "OccurrenceDate"))
+            try:
+                when = datetime.datetime.fromtimestamp(int(ms) / 1000, tz=datetime.timezone.utc)
+                ms = when.strftime("%Y-%m-%d %H:%M:%S UTC")
+            except (ValueError, OverflowError, OSError):
+                pass
+            details.append(("First occurrence (date)", ms))
+
+    if trigger == "timeout":
+        if mode in ("occuresOnce", "cyclic"):
+            occurrence()
+            if mode == "cyclic":
+                details.append(("Recurrence", unit_label(find_child(props, "RecurrenceCode"))))
+        elif mode == "userControls":
+            details.append(("Timeout", unit_label(find_child(props, "Timeout"))))
+    elif trigger == "rate":
+        details.append(("Rate", unit_label(find_child(props, "Rate"))))
+    elif trigger == "condition":
+        details.append(("Condition", cdata(find_child(props, "Condition"))))
+    return [(k, v) for k, v in details if v]
 
 
 def parse_dynamic_events(xml_path, java_path=None):
@@ -827,9 +857,9 @@ def render_events(events) -> str:
         out.append(f"#### `{ev['name']}`")
         parts = []
         if ev["trigger"]:
-            parts.append(f"- **Trigger**: `{ev['trigger']}`" + (f" / `{ev['mode']}`" if ev["mode"] else ""))
-        if ev["timeout"]:
-            parts.append(f"- **Period/Timeout**: `{ev['timeout']}`")
+            parts.append(f"- **Trigger**: `{ev['trigger']}`" + (f" / `{ev['mode']}`" if ev["mode"] and ev["trigger"] == "timeout" else ""))
+        for label, value in ev["details"]:
+            parts.append(f"- **{label}**: `{value}`")
         if parts:
             out.extend(parts)
         if ev["body"]:
