@@ -33,6 +33,7 @@ Options:
   --toc              Output only the model structure overview (agent list + file listing + database summary)
   --agent NAME        Parse only the specified agent (e.g. --agent Main)
   --class NAME        Parse only the specified global Java class (e.g. --class MyDummyClass)
+  --database T[:RANGE] Show rows of a database table (T:N first N, T:A-B rows A..B, T:all; default first 5)
   --optionlist NAME   Show only the specified model-level option list and its items
   --section S         Output only a given section: agent-class|steps|variables|functions|embedded|connectors|statechart|events|dynamic-events|network
   --output FILE       Write the full result to a file (produces a persistent reference document)
@@ -1066,6 +1067,9 @@ def discover_alpx(model_dir):
     return None
 
 
+DEFAULT_DB_ROWS = 5
+
+
 def split_top_level(text):
     """Split on commas that are outside parentheses and quotes"""
     parts, depth, quote, cur = [], 0, False, []
@@ -1099,7 +1103,7 @@ def parse_database(model_dir):
     with open(script, encoding="utf-8", errors="replace") as f:
         lines = f.read().splitlines()
     tables, rows, custom, names = {}, {}, {}, {}
-    pks, fks = set(), {}
+    pks, fks, raw_rows = set(), {}, {}
     for line in lines:
         m = re.match(r"CREATE (?:MEMORY |CACHED )?TABLE PUBLIC\.(\w+)\((.*)\)\s*$", line)
         if m:
@@ -1133,14 +1137,16 @@ def parse_database(model_dir):
             custom[(vals[0].upper(), vals[1].upper())] = (vals[2], vals[3])
         else:
             rows[tbl] = rows.get(tbl, 0) + 1
+            raw_rows.setdefault(tbl, []).append(m.group(2))
     result = []
     for tbl, cols in tables.items():
         if tbl.startswith("AL_"):
             continue
-        out_cols = []
-        for cname, typ in cols:
+        out_cols, col_idx = [], []
+        for i, (cname, typ) in enumerate(cols):
             if cname.upper().startswith("AL_"):
                 continue
+            col_idx.append(i)
             ctype = custom.get((tbl, cname.upper()))
             notes = []
             if (tbl, cname.upper()) in pks:
@@ -1151,13 +1157,71 @@ def parse_database(model_dir):
             out_cols.append((cname.lower(), ctype[1] if ctype else typ,
                              ctype[0] if ctype else None, notes))
         result.append({"name": names.get(tbl, tbl.lower()), "columns": out_cols,
-                       "rows": rows.get(tbl, 0)})
+                       "rows": rows.get(tbl, 0), "raw_rows": raw_rows.get(tbl, []),
+                       "col_idx": col_idx})
     pending = False
     log = os.path.join(db_dir, "db.log")
     if os.path.isfile(log):
         with open(log, encoding="utf-8", errors="replace") as f:
             pending = any(l.startswith("COMMIT") for l in f)
     return {"tables": result, "pending": pending}
+
+
+def parse_row_spec(spec):
+    """Split `table[:range]` → (table, start, end). Range: `N` (first N rows), `A-B` (rows A..B,
+    0-based inclusive), `all` / `-1` (every row); omitted → first DEFAULT_DB_ROWS.
+    end=None means no limit. Returns None for an unparseable range"""
+    table, sep, rng = spec.rpartition(":")
+    if not sep:
+        return spec, 0, DEFAULT_DB_ROWS - 1
+    rng = rng.strip().lower()
+    if rng in ("all", "-1"):
+        return table, 0, None
+    if re.fullmatch(r"\d+", rng):
+        n = int(rng)
+        return (table, 0, n - 1) if n > 0 else None
+    m = re.fullmatch(r"(\d+)-(\d+)", rng)
+    if m and int(m.group(2)) >= int(m.group(1)):
+        return table, int(m.group(1)), int(m.group(2))
+    return None
+
+
+def decode_sql_value(v):
+    v = v.strip()
+    if v.upper() == "NULL":
+        return "NULL"
+    if len(v) >= 2 and v[0] == "'" and v[-1] == "'":
+        return v[1:-1].replace("''", "'")
+    if re.fullmatch(r"-?\d+(?:\.\d+)?E-?\d+", v):  # HyperSQL DOUBLE literal, e.g. 0.1E0
+        return repr(float(v))
+    return v
+
+
+def render_database_rows(db, table, start, end) -> str:
+    t = next(t for t in db["tables"] if t["name"].lower() == table.lower())
+    total = len(t["raw_rows"])
+    last = total - 1 if end is None else min(end, total - 1)
+    out = [f"## Table `{t['name']}` — rows {start}–{last} of {total:,}" if start <= last
+           else f"## Table `{t['name']}` — no rows in range (table has {total:,} rows, indexed 0–{total - 1})"
+           if total else f"## Table `{t['name']}` — empty"]
+    if db["pending"]:
+        out.append("> Pending changes — rows below may be out of date; "
+                   "close and reopen the model to apply them.")
+    out.append("")
+    out.append("| " + " | ".join(c[0] for c in t["columns"]) + " |")
+    out.append("|" + "|".join("---" for _ in t["columns"]) + "|")
+    for raw in t["raw_rows"][start:last + 1]:
+        vals = split_top_level(raw)
+        cells = [_snip(decode_sql_value(vals[i]), 80) if i < len(vals) else "" for i in t["col_idx"]]
+        out.append("| " + " | ".join(cells) + " |")
+    if last < total - 1:
+        nxt = last + 1
+        out.append("")
+        more = total - 1 - last
+        out.append(f"… {more:,} more row{'' if more == 1 else 's'} — use "
+                   f"`{t['name']}:{nxt}-{min(nxt + DEFAULT_DB_ROWS * 10 - 1, total - 1)}` "
+                   f"or `{t['name']}:all`")
+    return "\n".join(out)
 
 
 def render_database_summary(db) -> str:
@@ -1236,6 +1300,9 @@ def main():
     parser.add_argument("--toc", action="store_true", help="Output only the structure overview")
     parser.add_argument("--agent", help="Parse only the specified agent")
     parser.add_argument("--class", dest="class_name", help="Parse only the specified global Java class (_alp/Classes/)")
+    parser.add_argument("--database", metavar="TABLE[:RANGE]",
+                        help="Show rows of a model database table. RANGE: N (first N), A-B (rows A..B, 0-based inclusive), "
+                             "all or -1 (every row); default first 5")
     parser.add_argument("--optionlist", help="Show only the specified model-level option list (defined in the .alpx)")
     parser.add_argument("--section", help="Output only a given section (agent-class|steps|variables|functions|embedded|connectors|statechart|events|dynamic-events|network)")
     parser.add_argument("--output", help="Write to a file (produces a persistent reference document)")
@@ -1259,7 +1326,22 @@ def main():
         print(render_toc(model_dir, agents, classes, option_lists, parse_database(model_dir)))
         return
 
-    if args.optionlist:
+    if args.database:
+        db = parse_database(model_dir)
+        if db is None:
+            print("❌ This model has no local database (database/db.script not found)", file=sys.stderr)
+            sys.exit(1)
+        spec = parse_row_spec(args.database)
+        if spec is None:
+            print(f"❌ Invalid row range in `{args.database}`. Use TABLE, TABLE:N, TABLE:A-B (A<=B), or TABLE:all", file=sys.stderr)
+            sys.exit(1)
+        table, start, end = spec
+        if not any(t["name"].lower() == table.lower() for t in db["tables"]):
+            available = ", ".join(sorted(t["name"] for t in db["tables"])) or "(none)"
+            print(f"❌ Table `{table}` not found. Available: {available}", file=sys.stderr)
+            sys.exit(1)
+        md = render_database_rows(db, table, start, end)
+    elif args.optionlist:
         target = next((ol for ol in option_lists if ol["name"].lower() == args.optionlist.lower()), None)
         if target is None:
             available = ", ".join(sorted(ol["name"] for ol in option_lists)) or "(none)"
