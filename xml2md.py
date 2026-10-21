@@ -593,6 +593,12 @@ def parse_java_class(java_path):
     return {"name": name, "code": code}
 
 
+def is_java_enum(cls) -> bool:
+    """True if the parsed Java class's top-level declaration is an enum"""
+    code = re.sub(r"/\*.*?\*/|//[^\n]*", "", cls["code"], flags=re.DOTALL)
+    return re.search(rf"\benum\s+{re.escape(cls['name'])}\b", code) is not None
+
+
 def parse_option_lists(alpx_path):
     """Parse the <OptionLists> of the model's .alpx file → [{name, options}].
 
@@ -1054,14 +1060,19 @@ def render_toc(model_dir, agents, class_paths, option_lists=()) -> str:
             out.append(f"- **`{ol['name']}`** — {len(ol['options'])} options: "
                        + ", ".join(f"`{o}`" for o in ol["options"]))
         out.append("")
-    if class_paths:
-        out.append("## Java Classes Use `--class <class_name>` to see details")
-        for p in class_paths:
+    enum_paths, plain_paths = [], []
+    for p in class_paths:
+        (enum_paths if is_java_enum(parse_java_class(p)) else plain_paths).append(p)
+    for title, paths in (("Java Enums", enum_paths), ("Java Classes", plain_paths)):
+        if not paths:
+            continue
+        out.append(f"## {title} (use `--class <class_name>` to see details)")
+        for p in paths:
             cls = parse_java_class(p)
             size = os.path.getsize(p)
             out.append(f"- **`{cls['name']}`** — `{os.path.relpath(p, alp_dir)}` ({size:,} B)")
         out.append("")
-    out.append("## Agents (Use `--agent <name>` to see details)")
+    out.append("## Agents (use `--agent <name>` to see details)")
     for d in agents:
         aoc = [f for f in os.listdir(d) if f.startswith("AOC.")]
         aoc_path = os.path.join(d, aoc[0]) if aoc else None
