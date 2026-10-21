@@ -24,7 +24,7 @@ A single `Level.level.xml` can reach **15,873 lines**. Feeding raw XML to an LLM
 
 | Section | Content |
 |---------|---------|
-| `agent-class` | Name, type (ENTITY/TRANSPORTER), imports, startup code |
+| `agent-class` | Name, type (ENTITY/TRANSPORTER), imports, additional class code, startup code, destroy code |
 | `variables` | Variable table (name \| type \| initial value \| description) |
 | `params` | Parameter table (name \| type \| default \| description) |
 | `collections` | Collection table (name \| collection type \| initialization) |

@@ -193,7 +193,17 @@ def parse_agent_class(aoc_path):
     info["imports"] = cdata(imp_el)
     start_el = find_child(root, "StartupCode")
     info["startup"] = cdata(start_el)
+    destroy_el = find_child(root, "DestroyCode")
+    info["destroy"] = cdata(destroy_el)
     return info
+
+
+def read_additional_class_code(java_path):
+    """Read Code/AdditionalClassCode.java → the agent's "Additional class code" text"""
+    if not os.path.exists(java_path):
+        return ""
+    with open(java_path, "r", encoding="utf-8") as f:
+        return f.read().strip()
 
 
 def parse_steps(aoc_path):
@@ -626,7 +636,9 @@ def parse_agent(agent_dir):
     result = {}
     aoc_candidates = [f for f in os.listdir(agent_dir) if f.startswith("AOC.") and f.endswith(".xml")]
     aoc_path = os.path.join(agent_dir, aoc_candidates[0]) if aoc_candidates else None
-    result["agent_class"] = parse_agent_class(aoc_path) if aoc_path else {"name": "", "usage": "", "imports": "", "startup": ""}
+    result["agent_class"] = parse_agent_class(aoc_path) if aoc_path else {"name": "", "usage": "", "imports": "", "startup": "", "destroy": ""}
+    result["agent_class"]["additional"] = read_additional_class_code(
+        os.path.join(agent_dir, "Code", "AdditionalClassCode.java"))
     result["steps"] = parse_steps(aoc_path) if aoc_path else {
         "env_enabled": False, "env_duration": "", "env_before": "", "env_after": "",
         "agent_before": "", "agent_after": "",
@@ -675,9 +687,15 @@ def render_agent_class(info) -> str:
     if info.get("imports"):
         lines.append(f"- **Imports**:")
         lines.append(f"```java\n{info['imports'].strip()}\n```")
+    if info.get("additional"):
+        lines.append(f"- **Additional class code**:")
+        lines.append(f"```java\n{info['additional'].strip()}\n```")
     if info.get("startup"):
         lines.append(f"- **Startup code**:")
         lines.append(f"```java\n{info['startup'].strip()}\n```")
+    if info.get("destroy"):
+        lines.append(f"- **Destroy code**:")
+        lines.append(f"```java\n{info['destroy'].strip()}\n```")
     return "\n".join(lines)
 
 
@@ -715,7 +733,7 @@ def render_steps(steps) -> str:
             out.append("- **Before step**:")
             out.append(f"```java\n{agent_before}\n```")
         if agent_after:
-            out.append("- **After step**:")
+            out.append("- **On step**:")
             out.append(f"```java\n{agent_after}\n```")
     return "\n".join(out)
 

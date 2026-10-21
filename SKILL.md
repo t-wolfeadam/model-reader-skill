@@ -58,7 +58,7 @@ and output only the semantic core.
 
 | Section | Contents |
 |---|---|
-| `agent-class` | Name, type (ENTITY/TRANSPORTER), imports, startup code |
+| `agent-class` | Name, type (ENTITY/TRANSPORTER), imports, additional class code, startup code, destroy code |
 | `variables` | Variable table (name\|type\|initial value\|description) |
 | `params` | Parameter table (name\|type\|default value\|description) |
 | `collections` | Collection table (name\|collection type\|initializer) |
