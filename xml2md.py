@@ -30,7 +30,7 @@ Usage:
   python xml2md.py <model_dir> [options]
 
 Options:
-  --toc              Output only the model structure overview (agent list + file listing)
+  --toc              Output only the model structure overview (agent list + file listing + database summary)
   --agent NAME        Parse only the specified agent (e.g. --agent Main)
   --class NAME        Parse only the specified global Java class (e.g. --class MyDummyClass)
   --optionlist NAME   Show only the specified model-level option list and its items
@@ -1066,7 +1066,117 @@ def discover_alpx(model_dir):
     return None
 
 
-def render_toc(model_dir, agents, class_paths, option_lists=()) -> str:
+def split_top_level(text):
+    """Split on commas that are outside parentheses and quotes"""
+    parts, depth, quote, cur = [], 0, False, []
+    for ch in text:
+        if ch == "'":
+            quote = not quote
+        elif not quote:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                parts.append("".join(cur).strip())
+                cur = []
+                continue
+        cur.append(ch)
+    if cur:
+        parts.append("".join(cur).strip())
+    return parts
+
+
+def parse_database(model_dir):
+    """Summarize the model's local HyperSQL database (`<model_dir>/database/`), or None.
+    Tables/columns/row counts come from `db.script`; user-facing column types come from the
+    `AL_CUSTOM_TYPE` rows. `AL_`-prefixed tables/columns are AnyLogic-internal and omitted.
+    `pending` is True if `db.log` (present while the model is open) contains COMMIT lines."""
+    db_dir = os.path.join(model_dir, "database")
+    script = os.path.join(db_dir, "db.script")
+    if not os.path.isfile(script):
+        return None
+    with open(script, encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+    tables, rows, custom, names = {}, {}, {}, {}
+    pks, fks = set(), {}
+    for line in lines:
+        m = re.match(r"CREATE (?:MEMORY |CACHED )?TABLE PUBLIC\.(\w+)\((.*)\)\s*$", line)
+        if m:
+            cols = []
+            for part in split_top_level(m.group(2)):
+                # Table-level UNIQUE(...) = the user's "primary key"; FOREIGN KEY = reference
+                um = re.search(r"UNIQUE\(([^)]*)\)", part)
+                if um and part.upper().startswith("CONSTRAINT"):
+                    for c in um.group(1).split(","):
+                        pks.add((m.group(1).upper(), c.strip().upper()))
+                fm = re.search(r"FOREIGN KEY\(([^)]*)\) REFERENCES PUBLIC\.(\w+)\(([^)]*)\)", part)
+                if fm:
+                    for c, rc in zip(fm.group(1).split(","), fm.group(3).split(",")):
+                        fks[(m.group(1).upper(), c.strip().upper())] = (fm.group(2), rc.strip())
+                cm = re.match(r"(\w+)\s+(\w+(?:\([^)]*\))?)", part)
+                if not cm or cm.group(1).upper() in ("CONSTRAINT", "PRIMARY", "UNIQUE", "FOREIGN"):
+                    continue
+                typ = cm.group(2).replace("(16777216)", "")
+                cols.append([cm.group(1), typ])
+            tables[m.group(1)] = cols
+            continue
+        m = re.match(r"INSERT INTO (\w+) VALUES\((.*)\)\s*$", line)
+        if not m:
+            continue
+        tbl = m.group(1).upper()
+        if tbl == "AL_TABLES":
+            vals = split_top_level(m.group(2))
+            names[vals[0].strip("'").upper()] = vals[0].strip("'")
+        elif tbl == "AL_CUSTOM_TYPE":
+            vals = [v.strip("'") for v in split_top_level(m.group(2))]
+            custom[(vals[0].upper(), vals[1].upper())] = (vals[2], vals[3])
+        else:
+            rows[tbl] = rows.get(tbl, 0) + 1
+    result = []
+    for tbl, cols in tables.items():
+        if tbl.startswith("AL_"):
+            continue
+        out_cols = []
+        for cname, typ in cols:
+            if cname.upper().startswith("AL_"):
+                continue
+            ctype = custom.get((tbl, cname.upper()))
+            notes = []
+            if (tbl, cname.upper()) in pks:
+                notes.append("PK")
+            ref = fks.get((tbl, cname.upper()))
+            if ref:  # Foreign key annotation
+                notes.append(f"**FK:** `{names.get(ref[0].upper(), ref[0].lower())}.{ref[1].lower()}`")
+            out_cols.append((cname.lower(), ctype[1] if ctype else typ,
+                             ctype[0] if ctype else None, notes))
+        result.append({"name": names.get(tbl, tbl.lower()), "columns": out_cols,
+                       "rows": rows.get(tbl, 0)})
+    pending = False
+    log = os.path.join(db_dir, "db.log")
+    if os.path.isfile(log):
+        with open(log, encoding="utf-8", errors="replace") as f:
+            pending = any(l.startswith("COMMIT") for l in f)
+    return {"tables": result, "pending": pending}
+
+
+def render_database_summary(db) -> str:
+    out = ["## Database"]
+    if db["pending"]:
+        out.append("> Pending changes — the info below may be out of date; "
+                   "close and reopen the model to apply them.")
+    if not db["tables"]:
+        out.append("(no user tables)")
+    for t in db["tables"]:
+        out.append(f"- **`{t['name']}`** — {t['rows']} row{'' if t['rows'] == 1 else 's'}")
+        for cname, ctype, kind, notes in t["columns"]:
+            suffix = f" ({kind.lower().replace('_', ' ')})" if kind else ""
+            extra = "".join(f" — **{n}**" if n == "PK" else f" — {n}" for n in notes)
+            out.append(f"  - `{cname}`: `{ctype}`{suffix}{extra}")
+    return "\n".join(out)
+
+
+def render_toc(model_dir, agents, class_paths, option_lists=(), database=None) -> str:
     """Render the model structure overview"""
     alp_dir = os.path.join(model_dir, "_alp")
     out = [f"# {os.path.basename(model_dir.rstrip('/'))} — Model structure overview", ""]
@@ -1114,6 +1224,9 @@ def render_toc(model_dir, agents, class_paths, option_lists=()) -> str:
                 full = os.path.join(levels_dir, f)
                 size = os.path.getsize(full)
                 out.append(f"  - `Levels/{f}` ({size:,} B)")
+    if database:
+        out.append("")
+        out.append(render_database_summary(database))
     return "\n".join(out)
 
 
@@ -1143,7 +1256,7 @@ def main():
     option_lists = parse_option_lists(discover_alpx(model_dir))
 
     if args.toc:
-        print(render_toc(model_dir, agents, classes, option_lists))
+        print(render_toc(model_dir, agents, classes, option_lists, parse_database(model_dir)))
         return
 
     if args.optionlist:
