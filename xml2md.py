@@ -23,7 +23,8 @@ Features:
   - Statecharts / networks resolve Id references to names
     (Source/Target → state name / node name)
   - Global Java classes (_alp/Classes/) — plain classes/records/enums that
-    belong to the model's global environment, not to any individual agent type
+    belong to the model's global environment
+  - Option lists — model-level enums
 
 Usage:
   python xml2md.py <model_dir> [options]
@@ -32,6 +33,7 @@ Options:
   --toc              Output only the model structure overview (agent list + file listing)
   --agent NAME        Parse only the specified agent (e.g. --agent Main)
   --class NAME        Parse only the specified global Java class (e.g. --class MyDummyClass)
+  --optionlist NAME   Show only the specified model-level option list and its items
   --section S         Output only a given section: agent-class|steps|variables|functions|embedded|connectors|statechart|events|dynamic-events|network
   --output FILE       Write the full result to a file (produces a persistent reference document)
   --quiet             Suppress progress messages
@@ -591,6 +593,24 @@ def parse_java_class(java_path):
     return {"name": name, "code": code}
 
 
+def parse_option_lists(alpx_path):
+    """Parse the <OptionLists> of the model's .alpx file → [{name, options}].
+
+    Option lists (enum-like lists of named options) are defined on the model itself,
+    not on any agent type, so they live in the .alpx rather than under `_alp/`."""
+    lists = []
+    if not alpx_path or not os.path.exists(alpx_path):
+        return lists
+    root = ET.parse(alpx_path).getroot()
+    for ol_parent in find_all_children(root, "OptionLists"):
+        for ol in find_children(ol_parent, "OptionList"):
+            lists.append({
+                "name": cdata(find_child(ol, "Name")),
+                "options": [cdata(find_child(o, "Name")) for o in find_children(ol, "Option")],
+            })
+    return lists
+
+
 # =====================================================================
 # Agent aggregation
 # =====================================================================
@@ -918,6 +938,21 @@ def render_java_classes(classes) -> str:
     return "\n\n".join([header] + [render_java_class(cls) for cls in classes])
 
 
+def render_option_list(ol) -> str:
+    out = [f"### `{ol['name']}`"]
+    out.extend(f"- `{o}`" for o in ol["options"])
+    return "\n".join(out)
+
+
+def render_option_lists(lists) -> str:
+    """Render the model-level option lists section (defined in the .alpx, not
+    belonging to any agent type)"""
+    if not lists:
+        return ""
+    header = "## Option Lists\n\n> Model-level option lists (not tied to any specific agent type) — declared in the `.alpx` file"
+    return "\n\n".join([header] + [render_option_list(ol) for ol in lists])
+
+
 def render_agent_section(section, agent):
     """Render the markdown for a single section"""
     if section == "agent-class":
@@ -996,20 +1031,37 @@ def discover_classes(model_dir):
     return paths
 
 
-def render_toc(model_dir, agents, class_paths) -> str:
+def discover_alpx(model_dir):
+    """Find the model's .alpx file: next to `_alp/` (inside model_dir), or in model_dir's
+    parent when model_dir is the `_alp` directory itself"""
+    for d in (model_dir, os.path.dirname(os.path.abspath(model_dir))):
+        if os.path.isdir(d):
+            found = sorted(f for f in os.listdir(d) if f.endswith(".alpx"))
+            if found:
+                return os.path.join(d, found[0])
+    return None
+
+
+def render_toc(model_dir, agents, class_paths, option_lists=()) -> str:
     """Render the model structure overview"""
     alp_dir = os.path.join(model_dir, "_alp")
     out = [f"# {os.path.basename(model_dir.rstrip('/'))} — Model structure overview", ""]
-    out.append("> Source: `_alp/` directory  |  Use `--agent <name>` to see details")
+    out.append("> Source: `_alp/` directory")
     out.append("")
+    if option_lists:
+        out.append("## Option Lists  (use `--optionlist <name>` to see details)")
+        for ol in option_lists:
+            out.append(f"- **`{ol['name']}`** — {len(ol['options'])} options: "
+                       + ", ".join(f"`{o}`" for o in ol["options"]))
+        out.append("")
     if class_paths:
-        out.append("## Java Classes")
+        out.append("## Java Classes Use `--class <class_name>` to see details")
         for p in class_paths:
             cls = parse_java_class(p)
             size = os.path.getsize(p)
             out.append(f"- **`{cls['name']}`** — `{os.path.relpath(p, alp_dir)}` ({size:,} B)")
         out.append("")
-    out.append("## Agents")
+    out.append("## Agents (Use `--agent <name>` to see details)")
     for d in agents:
         aoc = [f for f in os.listdir(d) if f.startswith("AOC.")]
         aoc_path = os.path.join(d, aoc[0]) if aoc else None
@@ -1042,6 +1094,7 @@ def main():
     parser.add_argument("--toc", action="store_true", help="Output only the structure overview")
     parser.add_argument("--agent", help="Parse only the specified agent")
     parser.add_argument("--class", dest="class_name", help="Parse only the specified global Java class (_alp/Classes/)")
+    parser.add_argument("--optionlist", help="Show only the specified model-level option list (defined in the .alpx)")
     parser.add_argument("--section", help="Output only a given section (agent-class|steps|variables|functions|embedded|connectors|statechart|events|dynamic-events|network)")
     parser.add_argument("--output", help="Write to a file (produces a persistent reference document)")
     parser.add_argument("--quiet", action="store_true", help="Don't print progress")
@@ -1058,11 +1111,20 @@ def main():
         print(f"❌ No agents found under {model_dir}/_alp/Agents/ (must contain AOC.*.xml)", file=sys.stderr)
         sys.exit(1)
 
+    option_lists = parse_option_lists(discover_alpx(model_dir))
+
     if args.toc:
-        print(render_toc(model_dir, agents, classes))
+        print(render_toc(model_dir, agents, classes, option_lists))
         return
 
-    if args.class_name:
+    if args.optionlist:
+        target = next((ol for ol in option_lists if ol["name"].lower() == args.optionlist.lower()), None)
+        if target is None:
+            available = ", ".join(sorted(ol["name"] for ol in option_lists)) or "(none)"
+            print(f"❌ Option list `{args.optionlist}` not found. Available: {available}", file=sys.stderr)
+            sys.exit(1)
+        md = render_option_list(target)
+    elif args.class_name:
         target = None
         for p in classes:
             cls = parse_java_class(p)
@@ -1098,6 +1160,9 @@ def main():
     else:
         # All global Java classes + all agents
         sections = []
+        option_lists_section = render_option_lists(option_lists)
+        if option_lists_section:
+            sections.append(option_lists_section)
         classes_section = render_java_classes([parse_java_class(p) for p in classes])
         if classes_section:
             sections.append(classes_section)

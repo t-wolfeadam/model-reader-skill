@@ -5,7 +5,7 @@ description: >-
   semantic Markdown, stripping out presentational noise like Id/coordinates/
   Label/UI config. Uses the Python script xml2md.py to automatically extract
   agent class definitions, shared plain Java classes/records/enums,
-  variables, parameters, collections, functions (including Java function
+  model-level option lists (AnyLogic's enum-like lists), variables, parameters, collections, functions (including Java function
   bodies), embedded objects (modules), flowchart chains, statecharts,
   synchronous step-event details, dynamic (schedulable-function) events,
   events, and network nodes/paths. Use when the user asks to read,
@@ -27,6 +27,7 @@ description: >-
 | Full dump of one agent | `python xml2md.py "<model_dir>" --agent Main` |
 | One section of one agent | `python xml2md.py "<model_dir>" --agent UGV --section statechart` |
 | A shared plain Java class/record/enum | `python xml2md.py "<model_dir>" --class SomeUtilClass` |
+| A model-level option list (enum) and its items | `python xml2md.py "<model_dir>" --optionlist SizeChoice` |
 | Generate a persistent reference doc | `python xml2md.py "<model_dir>" --output "<output.md>"` |
 
 Script location: `.claude/skills/model-reader/xml2md.py` (Python standard library, **zero dependencies, no venv needed**)
@@ -75,6 +76,7 @@ and output only the semantic core.
 | Flag | Contents |
 |---|---|
 | `--class <name>` | A plain Java class/record/enum shared globally across the model (not an AnyLogic agent) — its fields/members and full source, noise stripped |
+| `--optionlist <name>` | A model-level option list and the items it contains. **Option lists are effectively enums**: a named, fixed set of options (e.g. `SizeChoice` = `SMALL`, `MEDIUM`, `BIG`) that can be used as a type for parameters/variables and referenced in code as `SizeChoice.SMALL`. `--toc` also lists every option list with its items |
 
 ## Decision tree (consult this on every query)
 
@@ -101,7 +103,8 @@ User wants to understand an AnyLogic model →
 python xml2md.py "<model_dir>" --toc
 ```
 
-Outputs every agent's name, type, and the file listing (with sizes) in its
+Outputs the model's option lists (with their items), every shared Java class,
+and every agent's name, type, and the file listing (with sizes) in its
 directory. **Run this first** to get the lay of the land.
 
 ### 2. Look at a single agent
@@ -135,7 +138,20 @@ Use `--class` for plain Java classes, records, and enums that live outside
 any agent and are shared globally across the model (utility classes, DTOs,
 enum types), as opposed to `--agent` for AnyLogic agent types.
 
-### 4. Generate a persistent reference document
+### 4. Look at a model-level option list (enum)
+
+```bash
+python xml2md.py "<model_dir>" --optionlist MajorChoice
+```
+
+Option lists are effectively **enums**: a named, fixed set of options that a
+parameter or variable can take as its type. They are model-level — they don't
+belong to any agent.
+When an agent's variable/parameter has a type that isn't a Java built-in or a
+shared class, check `--toc` / `--optionlist` for a matching option list. The
+name match is case-insensitive.
+
+### 5. Generate a persistent reference document
 
 ```bash
 python xml2md.py "<model_dir>" --output "<model_dir>/CODE-REFERENCE.md"
@@ -156,6 +172,7 @@ the model changes** and it will always stay in sync with the source.
 | "What runs during a synchronized step?" | `--agent Main --section steps` |
 | "What does this schedulable-function object do, and with what arguments?" | `--agent Main --section dynamic-events` |
 | "What's in this shared utility class/record/enum?" | `--class <name>` |
+| "What values can this option list take?" | `--optionlist <name>` |
 
 ## Token-optimization rules
 
