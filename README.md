@@ -74,7 +74,7 @@ cp -r path/to/model-reader-skill .claude/skills/model-reader/
 ### 2. Test
 
 ```bash
-# Model structure overview (agent list + file inventory)
+# Model structure overview (agent list + file inventory + database summary, if the model has one)
 python .claude/skills/model-reader/xml2md.py "<model-dir>" --toc
 
 # Full dump of one agent
@@ -93,10 +93,10 @@ python .claude/skills/model-reader/xml2md.py "<model-dir>" --output "<model-dir>
 
 | Operation | Command |
 |-----------|---------|
-| Model structure overview | `python xml2md.py "<model-dir>" --toc` |
+| Model structure overview (includes database tables/columns/row counts if present) | `python xml2md.py "<model-dir>" --toc` |
 | Single agent, full dump | `python xml2md.py "<model-dir>" --agent Main` |
 | Single agent, one section | `python xml2md.py "<model-dir>" --agent UGV --section statechart` |
-| Persistent reference doc | `python xml2md.py "<model-dir>" --output "<output.md>"` |
+| Database table rows (default 5; `:N`, `:A-B`, `:all`) | `python xml2md.py "<model-dir>" --database my_table:10-20` || Persistent reference doc | `python xml2md.py "<model-dir>" --output "<output.md>"` |
 
 `--agent` accepts an agent name or directory name (case-insensitive). `--section` accepts: `class|variables|params|collections|functions|embedded|connectors|statechart|events|network`.
 

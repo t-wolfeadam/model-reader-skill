@@ -24,7 +24,7 @@ AnyLogic 模型源码 `_alp/` 是 XML，**约 90% 是噪音**：
 
 | 部分 | 内容 |
 |------|------|
-| `class` | 名称、类型（ENTITY/TRANSPORTER）、Import、启动代码 |
+| `class` | 名称、类型（ENTITY/TRANSPORTER）、Import、附加类代码、启动代码、销毁代码 |
 | `variables` | 变量表（名称 \| 类型 \| 初始值 \| 说明） |
 | `params` | 参数表（名称 \| 类型 \| 默认值 \| 说明） |
 | `collections` | 集合表（名称 \| 集合类型 \| 初始化） |
@@ -72,7 +72,7 @@ cp -r path/to/model-reader-skill .claude/skills/model-reader/
 ### 2. 测试
 
 ```bash
-# 模型结构总览（agent 列表 + 文件清单）
+# 模型结构总览（agent 列表 + 文件清单 + 数据库摘要，如果模型有本地数据库）
 python .claude/skills/model-reader/xml2md.py "<模型目录>" --toc
 
 # 单个 agent 全量
@@ -91,10 +91,10 @@ python .claude/skills/model-reader/xml2md.py "<模型目录>" --output "<模型�
 
 | 操作 | 命令 |
 |------|------|
-| 模型结构总览 | `python xml2md.py "<模型目录>" --toc` |
+| 模型结构总览（若有数据库，包含表/列/行数） | `python xml2md.py "<模型目录>" --toc` |
 | 单个 agent 全量 | `python xml2md.py "<模型目录>" --agent Main` |
 | 单 agent 单部分 | `python xml2md.py "<模型目录>" --agent UGV --section statechart` |
-| 生成持久参考文档 | `python xml2md.py "<模型目录>" --output "<输出.md>"` |
+| 数据库表的行（默认 5 行；`:N`、`:A-B`、`:all`） | `python xml2md.py "<模型目录>" --database my_table:10-20` || 生成持久参考文档 | `python xml2md.py "<模型目录>" --output "<输出.md>"` |
 
 `--agent` 接受 agent 名称或目录名（不区分大小写）。`--section` 支持：`class|variables|params|collections|functions|embedded|connectors|statechart|events|network`。
 

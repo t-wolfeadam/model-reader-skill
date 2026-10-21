@@ -23,12 +23,12 @@ description: >-
 
 | Action | Command |
 |---|---|
-| Model structure overview | `python xml2md.py "<model_dir>" --toc` |
+| Model structure overview (incl. database summary, if any) | `python xml2md.py "<model_dir>" --toc` |
 | Full dump of one agent | `python xml2md.py "<model_dir>" --agent Main` |
 | One section of one agent | `python xml2md.py "<model_dir>" --agent UGV --section statechart` |
 | A shared plain Java class/record/enum | `python xml2md.py "<model_dir>" --class SomeUtilClass` |
 | A model-level option list (enum) and its items | `python xml2md.py "<model_dir>" --optionlist SizeChoice` |
-| Generate a persistent reference doc | `python xml2md.py "<model_dir>" --output "<output.md>"` |
+| Rows of a database table | `python xml2md.py "<model_dir>" --database my_table:10-20` || Generate a persistent reference doc | `python xml2md.py "<model_dir>" --output "<output.md>"` |
 
 Script location: `.claude/skills/model-reader/xml2md.py` (Python standard library, **zero dependencies, no venv needed**)
 
@@ -77,7 +77,7 @@ and output only the semantic core.
 |---|---|
 | `--class <name>` | A plain Java class/record/enum shared globally across the model (not an AnyLogic agent) — its fields/members and full source, noise stripped |
 | `--optionlist <name>` | A model-level option list and the items it contains. **Option lists are effectively enums**: a named, fixed set of options (e.g. `SizeChoice` = `SMALL`, `MEDIUM`, `BIG`) that can be used as a type for parameters/variables and referenced in code as `SizeChoice.SMALL`. `--toc` also lists every option list with its items |
-
+| `--database <table>[:range]` | Rows of a table in the model's local database (`database/db.script`). Range: omitted = first 5 rows; `:N` = first N; `:A-B` = rows A to B (0-based, inclusive; the end is required); `:all` or `:-1` = every row. The header shows `rows A–B of TOTAL` and a footer gives the range to continue with. `--toc` lists the tables, columns, PKs/references and row counts. If the model is open, `db.log` pending changes mean rows may be stale |
 ## Decision tree (consult this on every query)
 
 ```
@@ -105,7 +105,12 @@ python xml2md.py "<model_dir>" --toc
 
 Outputs the model's option lists (with their items), every shared Java class,
 and every agent's name, type, and the file listing (with sizes) in its
-directory. **Run this first** to get the lay of the land.
+directory. If the model has a local database (`database/db.script`), it ends with
+a database summary: each user table with its row count, columns and types
+(option-list types shown by name), `PK` labels and foreign-key references, plus
+a note if `db.log` has pending changes (the model is open, so the info may be
+stale). Models without a database omit this section. Use `--database` for the
+rows. **Run this first** to get the lay of the land.
 
 ### 2. Look at a single agent
 
