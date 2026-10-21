@@ -24,7 +24,7 @@ A single `Level.level.xml` can reach **15,873 lines**. Feeding raw XML to an LLM
 
 | Section | Content |
 |---------|---------|
-| `class` | Name, type (ENTITY/TRANSPORTER), imports, startup code |
+| `agent-class` | Name, type (ENTITY/TRANSPORTER), imports, startup code |
 | `variables` | Variable table (name \| type \| initial value \| description) |
 | `params` | Parameter table (name \| type \| default \| description) |
 | `collections` | Collection table (name \| collection type \| initialization) |
@@ -33,6 +33,8 @@ A single `Level.level.xml` can reach **15,873 lines**. Feeding raw XML to an LLM
 | `connectors` | Flow chains (data-flow direction out → in) |
 | `statechart` | State machines (states + transitions + initial state, ID refs resolved to names) |
 | `events` | Events (trigger type \| period \| code) |
+| `dynamic-events` | Arguments and code body of this schedulable function type |
+| `steps` | Details about synchronous event steps (when enabled) |
 | `network` | Network nodes + paths (SourceId/TargetId resolved to node names) |
 
 ---

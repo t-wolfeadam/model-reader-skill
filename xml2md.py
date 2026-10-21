@@ -1,28 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-xml2md.py — AnyLogic 模型 XML → 语义化 Markdown 解析器
+xml2md.py — AnyLogic model XML → semantic Markdown parser
 =====================================================================
-用途：
-  把 AnyLogic 项目 `_alp/` 目录下充满噪音的 XML 源码，解析成语义化、
-  高信息密度的 Markdown，剥离 Id/坐标/Label/颜色/滑块配置等展示性噪音。
+Purpose:
+  Parses the noisy XML source code found under an AnyLogic project's
+  `_alp/` directory into semantic, information-dense Markdown, stripping
+  out presentational noise like Id/coordinates/Label/color/slider config.
 
-特性：
-  - 零依赖（仅 Python 标准库 xml.etree）
-  - 按 agent 组织：类定义 / 变量 / 参数 / 集合 / 函数 / 嵌入对象 / 流程链 / 状态机 / 事件 / 网络
-  - 函数体、事件体通过 `/*ALCODESTART::<Id>*/` 标记从 .java 关联（已验证 experiment3）
-  - 嵌入对象只输出「有 Value 的参数」（无 Value 的是默认未设置，属噪音）
-  - 状态机 / 网络把 Id 引用解析为名称（Source/Target → 状态名/节点名）
+Features:
+  - Zero dependencies (only Python's standard library xml.etree)
+  - Organized by agent: agent class definitions / variables / parameters /
+    collections / functions / embedded objects / flowchart chains /
+    statecharts / events / dynamic events / network
+  - Synchronous "steps" feature: environment-level step config (EnableSteps/
+    StepDurationCode/Before-After step code) and per-agent step callbacks
+    inherited from a parent agent type's steps
+  - Function bodies, event bodies, and dynamic event bodies are linked from the
+    associated .java file via `/*ALCODESTART::<Id>*/` markers (verified on experiment3)
+  - Embedded objects only output "parameters that have a Value" (params
+    without a Value are unset defaults and count as noise)
+  - Statecharts / networks resolve Id references to names
+    (Source/Target → state name / node name)
+  - Global Java classes (_alp/Classes/) — plain classes/records/enums that
+    belong to the model's global environment, not to any individual agent type
 
-用法：
-  python xml2md.py <模型目录> [选项]
+Usage:
+  python xml2md.py <model_dir> [options]
 
-选项：
-  --toc              只输出模型结构总览（agent 列表 + 文件清单）
-  --agent NAME       只解析指定 agent（如 --agent Main）
-  --section S        只输出某部分：class|variables|functions|embedded|connectors|statechart|events|network
-  --output FILE      把完整结果写入文件（生成持久参考文档）
-  --quiet            不打印进度信息
+Options:
+  --toc              Output only the model structure overview (agent list + file listing)
+  --agent NAME        Parse only the specified agent (e.g. --agent Main)
+  --class NAME        Parse only the specified global Java class (e.g. --class MyDummyClass)
+  --section S         Output only a given section: agent-class|steps|variables|functions|embedded|connectors|statechart|events|dynamic-events|network
+  --output FILE       Write the full result to a file (produces a persistent reference document)
+  --quiet             Suppress progress messages
 """
 
 import argparse
@@ -33,10 +45,10 @@ import sys
 import xml.etree.ElementTree as ET
 
 # =====================================================================
-# 常量
+# Constants
 # =====================================================================
 
-# 任何 XML 节点中都属于纯展示/样板噪音的标签（递归剥离）
+# Tags that are purely presentational/boilerplate noise in any XML node (stripped recursively)
 NOISE_TAGS = {
     "Id", "X", "Y", "Z", "ZHeight", "Label", "PublicFlag", "PresentationFlag",
     "ShowLabel", "DrawMode", "EmbeddedIcon", "LineWidth", "LineColor",
@@ -56,47 +68,47 @@ NOISE_TAGS = {
     "MakeDefaultViewArea", "LimitNumberOfArrayElements", "ElementsLimitValue",
     "SamplesToKeep", "FreezeXAxis", "AutoUpdate", "RecurrenceProperties",
     "OccurrenceAtTime", "OccurrenceDate", "OccurrenceTime", "RecurrenceCode",
-    "AutoCreate", "DatasetsCreationProperties", "EnableSteps", "StepDurationCode",
+    "AutoCreate", "DatasetsCreationProperties",
     "ColumnsCountCode", "RowsCountCode", "NeigborhoodType", "LayoutType",
     "NetworkType", "ConnectionsPerAgentCode", "ConnectionsRangeCode",
     "NeighborLinkFractionCode", "MCode", "ScaleRuler", "InheritedFromParentAgentType",
-    "ScaleType", "ModelLength", "LengthUnits", "Scale", "EnvironmentProperties",
-    "AgentProperties", "EnvironmentDefinesInitialLocation",
+    "ScaleType", "ModelLength", "LengthUnits", "Scale",
+    "EnvironmentDefinesInitialLocation",
     "RotateAnimationTowardsMovement", "RotateAnimationVertically",
     "VelocityCode", "PhysicalLength", "PhysicalWidth", "PhysicalHeight",
     "Properties", "ParameterEditor", "EditorContolType", "MinSliderValue",
     "MaxSliderValue", "DelimeterType", "SdArray", "UnitType", "ModificatorType",
-    "PackageName",  # 在 ActiveObjectClass 引用里 ClassName 足够，PackageName 剥离
-    "FlowChartsUsage",  # 单独提取，见 parse_class
+    "PackageName",  # In an ActiveObjectClass reference, ClassName is enough, so PackageName is stripped
+    "FlowChartsUsage",  # Extracted separately, see parse_agent_class
 }
 
-# 直接子级纯噪音（通常与语义子元素共存于同一父节点下）
+# Direct-child pure noise (usually coexists with semantic child elements under the same parent node)
 SKIP_ATTRS = {
     "SaveInSnapshot", "Constant", "AccessType", "StaticVariable", "ModificatorType",
     "Class", "Trigger", "Mode", "Source", "Target", "SourceId", "TargetId",
 }
 
 # =====================================================================
-# 工具函数
+# Utility functions
 # =====================================================================
 
 def localname(tag: str) -> str:
-    """去掉 namespace 前缀，如 '{urn}x' → 'x'"""
+    """Strip the namespace prefix, e.g. '{urn}x' → 'x'"""
     return tag.split('}')[-1] if tag.startswith('{') else tag
 
 
 def cdata(elem) -> str:
-    """返回元素的文本内容（含子元素代码），去掉首尾空白"""
+    """Return the element's text content (including child-element code), stripped of leading/trailing whitespace"""
     if elem is None:
         return ""
-    # 如果只有 text，直接用
+    # If it only has text, use it directly
     if elem.text:
         return elem.text.strip()
     return ""
 
 
 def find_child(elem, name):
-    """按本地名查找直接子元素"""
+    """Find a direct child element by local name"""
     for c in elem:
         if localname(c.tag) == name:
             return c
@@ -104,12 +116,12 @@ def find_child(elem, name):
 
 
 def find_children(elem, name):
-    """按本地名查找所有直接子元素"""
+    """Find all direct child elements by local name"""
     return [c for c in elem if localname(c.tag) == name]
 
 
 def find_all_children(elem, name):
-    """递归查找所有后代中的指定标签（本地名匹配）"""
+    """Recursively find all descendants with the given tag (matched by local name)"""
     out = []
     for c in elem:
         if localname(c.tag) == name:
@@ -119,15 +131,16 @@ def find_all_children(elem, name):
 
 
 def code_value(elem):
-    """从 Value/InitialValue/DefaultValue 的 CodeUnitValue/CodeValue 中提取代码文本
-    兼容 EntityCodeValue（newTransporter 等实体引用）：返回内部 ActiveObjectClass.ClassName"""
+    """Extract code text from the CodeUnitValue/CodeValue of a Value/InitialValue/DefaultValue element.
+    Also handles EntityCodeValue (entity references such as newTransporter): returns the inner
+    ActiveObjectClass.ClassName"""
     if elem is None:
         return ""
-    # 直接是 Code 子元素
+    # Directly a Code child element
     code = find_child(elem, "Code")
     if code is not None and code.text:
         return code.text.strip()
-    # 实体引用（EntityCodeValue → EntityEmbeddedObject → ActiveObjectClass.ClassName）
+    # Entity reference (EntityCodeValue → EntityEmbeddedObject → ActiveObjectClass.ClassName)
     aoc = find_child(elem, "ActiveObjectClass")
     if aoc is not None:
         cls = find_child(aoc, "ClassName")
@@ -137,12 +150,12 @@ def code_value(elem):
         cls = find_child(aoc, "ClassName")
         if cls is not None and cls.text:
             return cls.text.strip()
-    # 可能是 <Code>...</Code> 但空，或 unit value
+    # Could be an empty <Code>...</Code>, or a unit value
     return cdata(elem)
 
 
 def unit_label(elem):
-    """从 CodeUnitValue 提取 '值 单位'，如 '1 SECOND'"""
+    """Extract 'value unit' from a CodeUnitValue, e.g. '1 SECOND'"""
     if elem is None:
         return ""
     code = find_child(elem, "Code")
@@ -151,19 +164,21 @@ def unit_label(elem):
     u = ""
     if unit is not None:
         unit_child = unit
-        # Unit 元素本身有 Class 属性，文本为空；单位名在 Class 里（如 SpeedUnits 或 LengthUnits）
+        # The Unit element itself has a Class attribute and empty text; the unit name is in Class
+        # (e.g. SpeedUnits or LengthUnits)
         u = unit_child.get("Class", "")
-        # 去掉 Units 后缀：SpeedUnits → MPS? 不，Class=SpeedUnits 值在 Code 里。取 Unit 的文本。
+        # Strip the "Units" suffix: SpeedUnits → MPS? No — Class=SpeedUnits's value lives in Code.
+        # Just take the Unit element's text.
         u = unit_child.text or ""
     return f"{val} {u}".strip() if (val or u) else ""
 
 
 # =====================================================================
-# 各文件解析器
+# Per-file parsers
 # =====================================================================
 
-def parse_class(aoc_path):
-    """解析 AOC.*.xml → agent 类定义（名称、类型、导入、启动代码）"""
+def parse_agent_class(aoc_path):
+    """Parse AOC.*.xml → agent class definition (name, type, imports, startup code)"""
     info = {"name": "", "usage": "", "imports": "", "startup": ""}
     if not os.path.exists(aoc_path):
         return info
@@ -180,8 +195,41 @@ def parse_class(aoc_path):
     return info
 
 
+def parse_steps(aoc_path):
+    """Parse AOC.*.xml → synchronous "steps" feature config.
+
+    AnyLogic's steps feature has two halves that live in different tags:
+      - EnvironmentProperties: set on the agent type that OWNS the space (e.g. Main).
+        EnableSteps/StepDurationCode define whether/how often a step occurs; its own
+        BeforeStepCode/AfterStepCode fire once per step for the environment itself.
+      - AgentProperties: set on an agent type that gets PLACED into a population/space.
+        Its BeforeStepCode/AfterStepCode fire once per step for EACH agent instance,
+        but only take effect if the parent agent type's EnvironmentProperties has
+        EnableSteps=true.
+    """
+    info = {
+        "env_enabled": False, "env_duration": "", "env_before": "", "env_after": "",
+        "agent_before": "", "agent_after": "",
+    }
+    if not os.path.exists(aoc_path):
+        return info
+    tree = ET.parse(aoc_path)
+    root = tree.getroot()
+    env = find_child(root, "EnvironmentProperties")
+    if env is not None:
+        info["env_enabled"] = cdata(find_child(env, "EnableSteps")).lower() == "true"
+        info["env_duration"] = unit_label(find_child(env, "StepDurationCode"))
+        info["env_before"] = cdata(find_child(env, "BeforeStepCode"))
+        info["env_after"] = cdata(find_child(env, "AfterStepCode"))
+    agent = find_child(root, "AgentProperties")
+    if agent is not None:
+        info["agent_before"] = cdata(find_child(agent, "BeforeStepCode"))
+        info["agent_after"] = cdata(find_child(agent, "AfterStepCode"))
+    return info
+
+
 def parse_variables(xml_path):
-    """解析 Variables.xml → 变量 / 参数 / 集合 三类列表"""
+    """Parse Variables.xml → three lists: variables / parameters / collections"""
     variables, params, collections = [], [], []
     if not os.path.exists(xml_path):
         return variables, params, collections
@@ -192,20 +240,21 @@ def parse_variables(xml_path):
         name = cdata(find_child(var, "Name"))
         desc = cdata(find_child(var, "Description"))
         props = find_child(var, "Properties")
-        # 类型
+        # Type
         type_el = find_child(props, "Type") if props is not None else None
         vtype_name = cdata(type_el)
-        # 初始值 / 默认值
+        # Initial value / default value
         init = ""
         for tag in ("InitialValue", "DefaultValue"):
             el = find_child(props, tag) if props is not None else None
             if el is not None:
                 init = code_value(el)
                 break
-        # 集合
+        # Collection
         coll_class = cdata(find_child(props, "CollectionClass")) if props is not None else ""
         elem_class = cdata(find_child(props, "ElementClass")) if props is not None else ""
         val_class = cdata(find_child(props, "ValueElementClass")) if props is not None else ""
+
         init_code = ""
         init_el = find_child(props, "CollectionInitializer") if props is not None else None
         if init_el is not None:
@@ -213,7 +262,7 @@ def parse_variables(xml_path):
 
         row = {"name": name, "type": vtype_name, "desc": desc, "init": init}
         if vtype == "Parameter":
-            row["editor"] = vtype_name  # 参数类型即类型
+            row["editor"] = vtype_name  # the parameter's "type" is itself the editor type
             params.append(row)
         elif vtype == "CollectionVariable":
             coll_info = f"{coll_class} <{elem_class}"
@@ -230,20 +279,21 @@ def parse_variables(xml_path):
 
 
 def extract_java_bodies(java_path):
-    """从 .java 提取 /*ALCODESTART::<Id>*/ ... /*ALCODEEND*/ 代码块 → {id: code}
-    注意：Functions.java 里一个函数可能带嵌套的命名标记
-    （如 /*ALCODESTART::1783922945239*/ 后紧跟 /*ALCODESTART::send_emergency_stop_001*/），
-    提取时剥离所有内部 /*ALCODESTART::...*/ 嵌套标记。"""
+    """Extract /*ALCODESTART::<Id>*/ ... /*ALCODEEND*/ code blocks from a .java file → {id: code}
+    Note: a single function in Functions.java may carry a nested named marker
+    (e.g. /*ALCODESTART::1783922945239*/ immediately followed by
+    /*ALCODESTART::send_emergency_stop_001*/); any inner nested
+    /*ALCODESTART::...*/ markers are stripped out during extraction."""
     bodies = {}
     if not os.path.exists(java_path):
         return bodies
     with open(java_path, "r", encoding="utf-8") as f:
         text = f.read()
-    # 正则：ALCODESTART::<数字id> 到 ALCODEEND（非贪婪）
+    # Regex: ALCODESTART::<numeric id> through ALCODEEND (non-greedy)
     for m in re.finditer(r"/\*ALCODESTART::(\d+)\*/(.*?)/\*ALCODEEND\*/", text, re.DOTALL):
         fid = m.group(1)
         code = m.group(2)
-        # 剥离内部嵌套的命名 ALCODESTART 标记（如 send_emergency_stop_001）
+        # Strip any inner nested named ALCODESTART markers (e.g. send_emergency_stop_001)
         code = re.sub(r"/\*ALCODESTART::[^*]*?\*/", "", code)
         code = code.strip()
         if code:
@@ -252,7 +302,7 @@ def extract_java_bodies(java_path):
 
 
 def parse_functions(xml_path, java_path=None):
-    """解析 Functions.xml (+ Functions.java) → 函数列表（签名 + 代码）"""
+    """Parse Functions.xml (+ Functions.java) → list of functions (signature + code)"""
     funcs = []
     if not os.path.exists(xml_path):
         return funcs
@@ -279,7 +329,7 @@ def parse_functions(xml_path, java_path=None):
 
 
 def parse_embedded(xml_path):
-    """解析 EmbeddedObjects.xml → 嵌入对象列表（名称 + 类型 + 有值的参数 + 代码回调）"""
+    """Parse EmbeddedObjects.xml → list of embedded objects (name + type + params that have a value + code callbacks)"""
     objects = []
     if not os.path.exists(xml_path):
         return objects
@@ -287,16 +337,16 @@ def parse_embedded(xml_path):
     root = tree.getroot()
     for obj in find_children(root, "EmbeddedObject"):
         name = cdata(find_child(obj, "Name"))
-        # 类型
+        # Type
         aoc = find_child(obj, "ActiveObjectClass")
         cls = cdata(find_child(aoc, "ClassName")) if aoc is not None else ""
-        # 泛型实体类型（GenericParameterSubstituteValue）
+        # Generic entity type (GenericParameterSubstituteValue)
         gen_val = ""
         for g in find_all_children(obj, "GenericParameterSubstituteValue"):
             gen_val = cdata(g)
             if gen_val:
                 break
-        # 有 Value 的参数
+        # Parameters that have a Value
         params = []
         for p in find_children(find_child(obj, "Parameters"), "Parameter"):
             pname = cdata(find_child(p, "Name"))
@@ -314,7 +364,7 @@ def parse_embedded(xml_path):
 
 
 def parse_connectors(xml_path):
-    """解析 Connectors.xml → 流程链连接列表"""
+    """Parse Connectors.xml → list of flowchart-chain connections"""
     conns = []
     if not os.path.exists(xml_path):
         return conns
@@ -333,13 +383,15 @@ def parse_connectors(xml_path):
             dst_obj = cdata(find_child(ref, "ItemName"))
         for ref in find_children(c, "TargetConnectableItemReference"):
             dst_port = cdata(find_child(ref, "ItemName"))
-        # 数据流方向 = 从 out 端口流到 in 端口。
-        # Connector 的 Source=物理连接起点，Target=终点；但流程链语义是
-        # "携带 agent 从 out 流到 in"。当 src_port 以 in 结尾、dst_port 以 out 结尾时，
-        # 交换使其表示数据流方向（out → in）。
+        # Data-flow direction = flows from the "out" port to the "in" port.
+        # A Connector's Source = the physical connection start, Target = the end; but
+        # a flowchart chain's semantics are "carries the agent from out to in". When
+        # src_port ends in "in" and dst_port ends in "out", swap them so the pair
+        # represents the data-flow direction (out → in).
         src = f"{src_obj}.{src_port}" if src_obj else src_port
         dst = f"{dst_obj}.{dst_port}" if dst_obj else dst_port
-        # 物理连接: A.out → B.in 即数据流 A→B；若源是 in / 目标是 out，则反转
+        # Physical connection: A.out → B.in means data flows A→B; if the source is "in"
+        # or the target is "out", reverse it
         if src_port.endswith("in") and not dst_port.endswith("in"):
             src, dst = dst, src
         conns.append({"src": src, "dst": dst})
@@ -347,7 +399,7 @@ def parse_connectors(xml_path):
 
 
 def parse_statechart(aoc_path):
-    """解析 AOC.*.xml 的 <StatechartElements> → 状态机（状态、转移、初始指针）"""
+    """Parse the <StatechartElements> of AOC.*.xml → statechart (states, transitions, initial pointers)"""
     states = {}          # id → {name, entry, exit, parent}
     transitions = []     # {name, src, dst, trigger, cond, action, msg, timeout, filter}
     initials = []        # (from_id, to_id)
@@ -359,7 +411,7 @@ def parse_statechart(aoc_path):
     if sc is None:
         return states, transitions, initials
 
-    # 第一遍：收集所有 State 的名称（用于 id→名称解析）
+    # First pass: collect the names of all States (for id→name resolution)
     for el in find_children(sc, "StatechartElement"):
         cls = el.get("Class", "")
         if cls in ("State", "HistoryState"):
@@ -373,7 +425,7 @@ def parse_statechart(aoc_path):
                 states[sid]["entry"] = cdata(find_child(props, "EntryAction"))
                 states[sid]["exit"] = cdata(find_child(props, "ExitAction"))
 
-    # 第二遍：解析 Transition / InitialStatePointer / EntryPoint
+    # Second pass: parse Transition / InitialStatePointer / EntryPoint
     for el in find_children(sc, "StatechartElement"):
         cls = el.get("Class", "")
         name = cdata(find_child(el, "Name"))
@@ -405,7 +457,7 @@ def parse_statechart(aoc_path):
 
 
 def parse_events(xml_path, java_path=None):
-    """解析 Events.xml (+ Events.java) → 事件列表"""
+    """Parse Events.xml (+ Events.java) → list of events"""
     events = []
     if not os.path.exists(xml_path):
         return events
@@ -424,7 +476,7 @@ def parse_events(xml_path, java_path=None):
             if t_el is not None:
                 timeout = code_value(t_el)
             else:
-                # cyclic 事件：RecurrenceCode 是周期
+                # Cyclic event: RecurrenceCode holds the period
                 r_el = find_child(props, "RecurrenceCode")
                 if r_el is not None:
                     timeout = code_value(r_el)
@@ -435,8 +487,35 @@ def parse_events(xml_path, java_path=None):
     return events
 
 
+def parse_dynamic_events(xml_path, java_path=None):
+    """Parse DynamicEvents.xml (+ DynamicEvents.java) → list of dynamic events.
+
+    A dynamic event is a hybrid of an Event and a Function: it takes typed
+    parameters like a function, but instead of running immediately it is scheduled
+    (e.g. via create()) to run its body at a later, computed time with the bound
+    argument values."""
+    events = []
+    if not os.path.exists(xml_path):
+        return events
+    bodies = extract_java_bodies(java_path) if java_path else {}
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    for de in find_children(root, "DynamicEventClass"):
+        eid = cdata(find_child(de, "Id"))
+        name = cdata(find_child(de, "Name"))
+        params = []
+        for p in find_children(de, "Parameter"):
+            pname = cdata(find_child(p, "Name"))
+            ptype = cdata(find_child(p, "Type"))
+            params.append(f"{ptype} {pname}".strip())
+        events.append({
+            "name": name, "params": params, "body": bodies.get(eid, ""),
+        })
+    return events
+
+
 def parse_network(level_xml_path):
-    """解析 Level*.xml 的 <Network> → 节点表 + 路径表"""
+    """Parse the <Network> of Level*.xml → node table + path table"""
     nodes = {}       # id → {name, type, x, y}
     paths = []       # {name, src, dst, type}
     if not os.path.exists(level_xml_path):
@@ -466,16 +545,36 @@ def parse_network(level_xml_path):
     return nodes, paths
 
 
+def parse_java_class(java_path):
+    """Parse a Class.<Name>.java file under _alp/Classes/ → {name, code}.
+
+    These are plain Java source files (classes/records/enums/interfaces) declared
+    directly in the model's "Classes" node. They belong to the model's global
+    environment — like the agent types themselves — rather than to any individual
+    agent type, so they are rendered as their own top-level section instead of being
+    nested under an agent."""
+    basename = os.path.basename(java_path)
+    m = re.match(r"Class\.(.+)\.java$", basename)
+    name = m.group(1) if m else basename
+    with open(java_path, "r", encoding="utf-8") as f:
+        code = f.read().strip()
+    return {"name": name, "code": code}
+
+
 # =====================================================================
-# Agent 聚合
+# Agent aggregation
 # =====================================================================
 
 def parse_agent(agent_dir):
-    """解析单个 agent 目录下的所有语义文件"""
+    """Parse all the semantic files under a single agent directory"""
     result = {}
     aoc_candidates = [f for f in os.listdir(agent_dir) if f.startswith("AOC.") and f.endswith(".xml")]
     aoc_path = os.path.join(agent_dir, aoc_candidates[0]) if aoc_candidates else None
-    result["class"] = parse_class(aoc_path) if aoc_path else {"name": "", "usage": "", "imports": "", "startup": ""}
+    result["agent_class"] = parse_agent_class(aoc_path) if aoc_path else {"name": "", "usage": "", "imports": "", "startup": ""}
+    result["steps"] = parse_steps(aoc_path) if aoc_path else {
+        "env_enabled": False, "env_duration": "", "env_before": "", "env_after": "",
+        "agent_before": "", "agent_after": "",
+    }
 
     result["variables"], result["params"], result["collections"] = parse_variables(
         os.path.join(agent_dir, "Variables.xml"))
@@ -491,7 +590,11 @@ def parse_agent(agent_dir):
     ev_java = os.path.join(agent_dir, "Code", "Events.java")
     result["events"] = parse_events(os.path.join(agent_dir, "Code", "Events.xml"), ev_java)
 
-    # 网络：Levels/Level*.xml 里可能只有其中一个有 Network
+    de_java = os.path.join(agent_dir, "Code", "DynamicEvents.java")
+    result["dynamic_events"] = parse_dynamic_events(
+        os.path.join(agent_dir, "Code", "DynamicEvents.xml"), de_java)
+
+    # Network: only one of the Levels/Level*.xml files may actually have a Network
     result["network"] = None
     levels_dir = os.path.join(agent_dir, "Levels")
     if os.path.isdir(levels_dir):
@@ -505,49 +608,89 @@ def parse_agent(agent_dir):
 
 
 # =====================================================================
-# Markdown 渲染
+# Markdown rendering
 # =====================================================================
 
-def render_class(info) -> str:
-    lines = [f"### 类定义"]
+def render_agent_class(info) -> str:
+    lines = [f"### Agent class definition"]
     name = info.get("name", "")
     usage = info.get("usage", "")
-    lines.append(f"- **名称**: `{name}`" + (f"  |  类型: `{usage}`" if usage else ""))
+    lines.append(f"- **Name**: `{name}`" + (f"  |  Type: `{usage}`" if usage else ""))
     if info.get("imports"):
-        lines.append(f"- **导入**:")
+        lines.append(f"- **Imports**:")
         lines.append(f"```java\n{info['imports'].strip()}\n```")
     if info.get("startup"):
-        lines.append(f"- **启动代码**:")
+        lines.append(f"- **Startup code**:")
         lines.append(f"```java\n{info['startup'].strip()}\n```")
     return "\n".join(lines)
+
+
+def render_steps(steps) -> str:
+    """Render the synchronous "steps" feature: environment-level step config (this
+    agent type's own space) and per-agent step callbacks (fire per-instance when this
+    agent type is placed inside a parent agent type/population whose space has steps enabled)"""
+    if not steps:
+        return ""
+    env_enabled = steps.get("env_enabled", False)
+    env_before = steps.get("env_before", "")
+    env_after = steps.get("env_after", "")
+    agent_before = steps.get("agent_before", "")
+    agent_after = steps.get("agent_after", "")
+
+    has_env = env_enabled or env_before or env_after
+    has_agent = bool(agent_before or agent_after)
+    if not has_env and not has_agent:
+        return ""
+
+    out = ["### Synchronous steps"]
+    if has_env:
+        out.append("#### Environment (this agent type's own space)")
+        status = f"enabled, every `{steps.get('env_duration', '')}`" if env_enabled else "disabled"
+        out.append(f"- **Steps**: {status}")
+        if env_before:
+            out.append("- **Before step**:")
+            out.append(f"```java\n{env_before}\n```")
+        if env_after:
+            out.append("- **After step**:")
+            out.append(f"```java\n{env_after}\n```")
+    if has_agent:
+        out.append("#### Per-agent step callbacks (require the parent agent type's steps to be enabled)")
+        if agent_before:
+            out.append("- **Before step**:")
+            out.append(f"```java\n{agent_before}\n```")
+        if agent_after:
+            out.append("- **After step**:")
+            out.append(f"```java\n{agent_after}\n```")
+    return "\n".join(out)
 
 
 def render_variables(vars_, params, collections) -> str:
     out = []
     if vars_:
-        out.append("### 变量")
-        out.append("| 名称 | 类型 | 初始值 | 说明 |")
+        out.append("### Variables")
+        out.append("| Name | Type | Initial value | Description |")
         out.append("|---|---|---|---|")
         for v in vars_:
             init = v["init"].replace("|", "\\|")
             desc = v["desc"].replace("|", "\\|")
             out.append(f"| `{v['name']}` | `{v['type']}` | `{init}` | {desc} |")
     if params:
-        out.append("### 参数")
-        out.append("| 名称 | 类型 | 默认值 | 说明 |")
+        out.append("### Parameters")
+        out.append("| Name | Type | Default value | Description |")
         out.append("|---|---|---|---|")
         for p in params:
             init = p["init"].replace("|", "\\|")
             desc = p["desc"].replace("|", "\\|")
             out.append(f"| `{p['name']}` | `{p['type']}` | `{init}` | {desc} |")
     if collections:
-        out.append("### 集合")
-        out.append("| 名称 | 集合类型 | 说明 |")
+        out.append("### Collections")
+        out.append("| Name | Collection type | Description |")
         out.append("|---|---|---|")
         for c in collections:
             desc = c["desc"].replace("|", "\\|")
             typ = c["type"]
-            # 集合初始化代码（如 {node0,node1,...}）可能超长，截断并换行展示
+            # Collection-initializer code (e.g. {node0,node1,...}) can be very long;
+            # truncate it and show it on its own line
             if " = {" in typ and len(typ) > 120:
                 typ = typ.split(" = {")[0] + " = {...}"
             out.append(f"| `{c['name']}` | `{typ}` | {desc} |")
@@ -557,20 +700,20 @@ def render_variables(vars_, params, collections) -> str:
 def render_functions(funcs) -> str:
     if not funcs:
         return ""
-    out = ["### 函数"]
+    out = ["### Functions"]
     for fn in funcs:
         params = ", ".join(fn["params"]) if fn["params"] else ""
         sig = f"{fn['name']}({params})"
         out.append(f"#### `{sig}`")
         parts = []
         if fn["return_mod"] != "VOID" or fn["return_type"]:
-            parts.append(f"- **返回**: `{fn['return_type']}`")
+            parts.append(f"- **Returns**: `{fn['return_type']}`")
         if fn["desc"]:
-            parts.append(f"- **说明**: {fn['desc']}")
+            parts.append(f"- **Description**: {fn['desc']}")
         if parts:
             out.extend(parts)
         if fn["body"]:
-            out.append(f"- **代码**:")
+            out.append(f"- **Code**:")
             out.append(f"```java\n{fn['body']}\n```")
     return "\n".join(out)
 
@@ -578,18 +721,18 @@ def render_functions(funcs) -> str:
 def render_embedded(objects) -> str:
     if not objects:
         return ""
-    out = ["### 嵌入对象"]
+    out = ["### Embedded objects"]
     for obj in objects:
         cls = obj["class"]
         gen = f"<{obj['generic']}>" if obj["generic"] else ""
         type_str = f"{cls}{gen}"
         out.append(f"#### `{obj['name']}` — `{type_str}`")
         if obj["params"]:
-            # 分成简单值 和 代码回调
+            # Split into simple values and code callbacks
             simple = [(k, v) for k, v in obj["params"] if "\n" not in v and len(v) < 80]
             code = [(k, v) for k, v in obj["params"] if "\n" in v or len(v) >= 80]
             if simple:
-                out.append("| 参数 | 值 |")
+                out.append("| Parameter | Value |")
                 out.append("|---|---|")
                 for k, v in simple:
                     out.append(f"| `{k}` | `{v}` |")
@@ -602,7 +745,7 @@ def render_embedded(objects) -> str:
 def render_connectors(conns) -> str:
     if not conns:
         return ""
-    out = ["### 流程链", ""]
+    out = ["### Flowchart chain", ""]
     out.append("```text")
     for c in conns:
         out.append(f"{c['src']}  →  {c['dst']}")
@@ -611,7 +754,7 @@ def render_connectors(conns) -> str:
 
 
 def _snip(text, limit):
-    """截断文本用于表格单元格（处理换行 → 空格，去掉竖线避免破表）"""
+    """Truncate text for a table cell (turn newlines → spaces, strip pipes to avoid breaking the table)"""
     text = text.replace("|", "\\|").replace("\n", " ").strip()
     return text if len(text) <= limit else text[:limit] + "…"
 
@@ -619,30 +762,30 @@ def _snip(text, limit):
 def render_statechart(states, transitions, initials) -> str:
     if not states and not transitions:
         return ""
-    out = ["### 状态机"]
-    # 顶层 + 嵌套状态列表（EntryAction/ExitAction 多行则下沉为代码块）
+    out = ["### Statechart"]
+    # Top-level + nested state list (multi-line EntryAction/ExitAction get pushed down into a code block)
     if states:
-        out.append("#### 状态")
-        out.append("| 状态 | 父状态 | EntryAction | ExitAction |")
+        out.append("#### States")
+        out.append("| State | Parent state | EntryAction | ExitAction |")
         out.append("|---|---|---|---|")
         for s in states.values():
             entry = _snip(s["entry"], 60)
             exit_ = _snip(s["exit"], 60)
             out.append(f"| `{s['name']}` | `{s['parent'] or 'ROOT'}` | `{entry}` | `{exit_}` |")
-        # 有代码的状态动作单独列出（避免塞爆表格）
+        # States with actual code in their actions are listed separately (to avoid overstuffing the table)
         code_actions = []
         for s in states.values():
             for tag, text in (("EntryAction", s["entry"]), ("ExitAction", s["exit"])):
                 if text and "\n" in text:
                     code_actions.append((s["name"], tag, text))
         if code_actions:
-            out.append("##### 状态动作代码")
+            out.append("##### State action code")
             for (sname, tag, text) in code_actions:
                 out.append(f"**{sname}.{tag}**:")
                 out.append(f"```java\n{text}\n```")
     if transitions:
-        out.append("#### 转移")
-        out.append("| 源 → 目标 | 触发 | 条件/消息 | 动作摘要 |")
+        out.append("#### Transitions")
+        out.append("| Source → Target | Trigger | Condition/Message | Action summary |")
         out.append("|---|---|---|---|")
         for t in transitions:
             src_name = states.get(t["src"], {}).get("name", t["src"]) if t["src"] else "entry"
@@ -658,18 +801,18 @@ def render_statechart(states, transitions, initials) -> str:
                 msg = f"timeout {t['timeout']}"
             action = _snip(t["action"], 60)
             out.append(f"| `{src_name}` → `{dst_name}` | `{trigger}` | `{msg}` | `{action}` |")
-        # 多行动作单独用代码块展示
+        # Multi-line actions are shown separately as code blocks
         code_trans = [(t["src"], t["dst"], t["action"]) for t in transitions
                       if t["action"] and "\n" in t["action"]]
         if code_trans:
-            out.append("##### 转移动作代码")
+            out.append("##### Transition action code")
             for (src, dst, text) in code_trans:
                 src_name = states.get(src, {}).get("name", src)
                 dst_name = states.get(dst, {}).get("name", dst)
                 out.append(f"**`{src_name}` → `{dst_name}`**:")
                 out.append(f"```java\n{text}\n```")
     if initials:
-        out.append("#### 初始指向")
+        out.append("#### Initial pointers")
         for (p, dst) in initials:
             dst_name = states.get(dst, {}).get("name", dst)
             out.append(f"- `{p or 'entry'}` → `{dst_name}`")
@@ -679,18 +822,35 @@ def render_statechart(states, transitions, initials) -> str:
 def render_events(events) -> str:
     if not events:
         return ""
-    out = ["### 事件"]
+    out = ["### Events"]
     for ev in events:
         out.append(f"#### `{ev['name']}`")
         parts = []
         if ev["trigger"]:
-            parts.append(f"- **触发**: `{ev['trigger']}`" + (f" / `{ev['mode']}`" if ev["mode"] else ""))
+            parts.append(f"- **Trigger**: `{ev['trigger']}`" + (f" / `{ev['mode']}`" if ev["mode"] else ""))
         if ev["timeout"]:
-            parts.append(f"- **周期/超时**: `{ev['timeout']}`")
+            parts.append(f"- **Period/Timeout**: `{ev['timeout']}`")
         if parts:
             out.extend(parts)
         if ev["body"]:
-            out.append(f"- **代码**:")
+            out.append(f"- **Code**:")
+            out.append(f"```java\n{ev['body']}\n```")
+    return "\n".join(out)
+
+
+def render_dynamic_events(events) -> str:
+    """Render dynamic events: hybrids of Events and Functions — they take
+    parameters like a function, but are scheduled to run their body at a later
+    time with the bound argument values, like an event"""
+    if not events:
+        return ""
+    out = ["### Dynamic events"]
+    for ev in events:
+        params = ", ".join(ev["params"]) if ev["params"] else ""
+        sig = f"{ev['name']}({params})"
+        out.append(f"#### `{sig}`")
+        if ev["body"]:
+            out.append(f"- **Code**:")
             out.append(f"```java\n{ev['body']}\n```")
     return "\n".join(out)
 
@@ -698,26 +858,42 @@ def render_events(events) -> str:
 def render_network(net) -> str:
     if not net or not (net["nodes"] or net["paths"]):
         return ""
-    out = ["### 网络"]
+    out = ["### Network"]
     nodes = net["nodes"]
     paths = net["paths"]
     if nodes:
-        out.append("| 节点 | 类型 | 坐标 |")
+        out.append("| Node | Type | Coordinates |")
         out.append("|---|---|---|")
         for n in nodes.values():
             out.append(f"| `{n['name']}` | `{n['type']}` | ({n['x']}, {n['y']}) |")
     if paths:
-        out.append("| 路径 | 连接 | 类型 |")
+        out.append("| Path | Connection | Type |")
         out.append("|---|---|---|")
         for p in paths:
             out.append(f"| `{p['name']}` | `{p['src']}` ↔ `{p['dst']}` | `{p['type']}` |")
     return "\n".join(out)
 
 
+def render_java_class(cls) -> str:
+    return f"### `{cls['name']}`\n```java\n{cls['code']}\n```"
+
+
+def render_java_classes(classes) -> str:
+    """Render the global Java classes section (_alp/Classes/): plain Java
+    classes/records/enums that belong to the model's global environment rather than
+    to any individual agent type"""
+    if not classes:
+        return ""
+    header = "## Java Classes\n\n> Global environment classes (not tied to any specific agent type) — declared under `_alp/Classes/`"
+    return "\n\n".join([header] + [render_java_class(cls) for cls in classes])
+
+
 def render_agent_section(section, agent):
-    """渲染单个 section 的 markdown"""
-    if section == "class":
-        return render_class(agent["class"])
+    """Render the markdown for a single section"""
+    if section == "agent-class":
+        return render_agent_class(agent["agent_class"])
+    if section == "steps":
+        return render_steps(agent["steps"])
     if section == "variables":
         return render_variables(agent["variables"], agent["params"], agent["collections"])
     if section == "functions":
@@ -730,35 +906,39 @@ def render_agent_section(section, agent):
         return render_statechart(agent["statechart"], agent["transitions"], agent["initials"])
     if section == "events":
         return render_events(agent["events"])
+    if section == "dynamic-events":
+        return render_dynamic_events(agent["dynamic_events"])
     if section == "network":
         return render_network(agent["network"])
     return ""
 
 
 def render_agent(agent) -> str:
-    """渲染一个 agent 的完整 markdown"""
-    name = agent["class"]["name"]
+    """Render the full markdown for one agent"""
+    name = agent["agent_class"]["name"]
     out = [f"## {name}", ""]
-    out.append(render_class(agent["class"]))
+    out.append(render_agent_class(agent["agent_class"]))
+    out.append(render_steps(agent["steps"]))
     out.append(render_variables(agent["variables"], agent["params"], agent["collections"]))
     out.append(render_functions(agent["functions"]))
     out.append(render_embedded(agent["embedded"]))
     out.append(render_connectors(agent["connectors"]))
     out.append(render_statechart(agent["statechart"], agent["transitions"], agent["initials"]))
     out.append(render_events(agent["events"]))
+    out.append(render_dynamic_events(agent["dynamic_events"]))
     out.append(render_network(agent["network"]))
     return "\n\n".join([x for x in out if x.strip()])
 
 
 # =====================================================================
-# 主流程
+# Main flow
 # =====================================================================
 
 def discover_agents(model_dir):
-    """在模型目录下发现所有 agent 目录"""
+    """Discover all agent directories under the model directory"""
     alp_dir = os.path.join(model_dir, "_alp")
     if not os.path.isdir(alp_dir):
-        # 兼容：模型目录本身就是 _alp 的父级
+        # Compatibility: the model directory itself is already the parent of _alp
         alp_dir = model_dir
     agents_dir = os.path.join(alp_dir, "Agents")
     agents = []
@@ -770,17 +950,40 @@ def discover_agents(model_dir):
     return agents
 
 
-def render_toc(model_dir, agents) -> str:
-    """渲染模型结构总览"""
+def discover_classes(model_dir):
+    """Discover global Java class files under _alp/Classes/. These belong to the
+    model's global environment (like the agent types themselves), not to any
+    individual agent type."""
     alp_dir = os.path.join(model_dir, "_alp")
-    out = [f"# {os.path.basename(model_dir.rstrip('/'))} — 模型结构总览", ""]
-    out.append("> 来源: `_alp/` 目录  |  用 `--agent <名称>` 查看详情")
+    if not os.path.isdir(alp_dir):
+        alp_dir = model_dir
+    classes_dir = os.path.join(alp_dir, "Classes")
+    paths = []
+    if os.path.isdir(classes_dir):
+        for name in sorted(os.listdir(classes_dir)):
+            if name.startswith("Class.") and name.endswith(".java"):
+                paths.append(os.path.join(classes_dir, name))
+    return paths
+
+
+def render_toc(model_dir, agents, class_paths) -> str:
+    """Render the model structure overview"""
+    alp_dir = os.path.join(model_dir, "_alp")
+    out = [f"# {os.path.basename(model_dir.rstrip('/'))} — Model structure overview", ""]
+    out.append("> Source: `_alp/` directory  |  Use `--agent <name>` to see details")
     out.append("")
+    if class_paths:
+        out.append("## Java Classes")
+        for p in class_paths:
+            cls = parse_java_class(p)
+            size = os.path.getsize(p)
+            out.append(f"- **`{cls['name']}`** — `{os.path.relpath(p, alp_dir)}` ({size:,} B)")
+        out.append("")
     out.append("## Agents")
     for d in agents:
         aoc = [f for f in os.listdir(d) if f.startswith("AOC.")]
         aoc_path = os.path.join(d, aoc[0]) if aoc else None
-        info = parse_class(aoc_path) if aoc_path else {"name": "?", "usage": ""}
+        info = parse_agent_class(aoc_path) if aoc_path else {"name": "?", "usage": ""}
         usage = f" [{info['usage']}]" if info.get("usage") else ""
         out.append(f"- **`{info['name']}`**{usage} — `{os.path.relpath(d, alp_dir)}`")
         for f in sorted(os.listdir(d)):
@@ -804,44 +1007,58 @@ def render_toc(model_dir, agents) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AnyLogic XML → 语义化 Markdown")
-    parser.add_argument("model_dir", help="模型目录（含 _alp/）")
-    parser.add_argument("--toc", action="store_true", help="只输出结构总览")
-    parser.add_argument("--agent", help="只解析指定 agent")
-    parser.add_argument("--section", help="只输出某部分（class|variables|functions|embedded|connectors|statechart|events|network）")
-    parser.add_argument("--output", help="写入文件（生成持久参考文档）")
-    parser.add_argument("--quiet", action="store_true", help="不打印进度")
+    parser = argparse.ArgumentParser(description="AnyLogic XML → semantic Markdown")
+    parser.add_argument("model_dir", help="Model directory (containing _alp/)")
+    parser.add_argument("--toc", action="store_true", help="Output only the structure overview")
+    parser.add_argument("--agent", help="Parse only the specified agent")
+    parser.add_argument("--class", dest="class_name", help="Parse only the specified global Java class (_alp/Classes/)")
+    parser.add_argument("--section", help="Output only a given section (agent-class|steps|variables|functions|embedded|connectors|statechart|events|dynamic-events|network)")
+    parser.add_argument("--output", help="Write to a file (produces a persistent reference document)")
+    parser.add_argument("--quiet", action="store_true", help="Don't print progress")
     args = parser.parse_args()
 
     model_dir = args.model_dir
     if not os.path.isdir(model_dir):
-        print(f"❌ 目录不存在: {model_dir}", file=sys.stderr)
+        print(f"❌ Directory does not exist: {model_dir}", file=sys.stderr)
         sys.exit(1)
 
     agents = discover_agents(model_dir)
+    classes = discover_classes(model_dir)
     if not agents:
-        print(f"❌ 未在 {model_dir}/_alp/Agents/ 下发现任何 agent（需含 AOC.*.xml）", file=sys.stderr)
+        print(f"❌ No agents found under {model_dir}/_alp/Agents/ (must contain AOC.*.xml)", file=sys.stderr)
         sys.exit(1)
 
     if args.toc:
-        print(render_toc(model_dir, agents))
+        print(render_toc(model_dir, agents, classes))
         return
 
-    if args.agent:
-        # 定位 agent 目录
+    if args.class_name:
+        target = None
+        for p in classes:
+            cls = parse_java_class(p)
+            if cls["name"].lower() == args.class_name.lower():
+                target = cls
+                break
+        if target is None:
+            available = ", ".join(sorted(parse_java_class(p)["name"] for p in classes))
+            print(f"❌ Class `{args.class_name}` not found. Available: {available}", file=sys.stderr)
+            sys.exit(1)
+        md = render_java_class(target)
+    elif args.agent:
+        # Locate the agent directory
         target = None
         for d in agents:
             aoc = [f for f in os.listdir(d) if f.startswith("AOC.")]
             aoc_path = os.path.join(d, aoc[0]) if aoc else None
-            info = parse_class(aoc_path) if aoc_path else {"name": ""}
+            info = parse_agent_class(aoc_path) if aoc_path else {"name": ""}
             if info["name"].lower() == args.agent.lower() or os.path.basename(d).lower() == args.agent.lower():
                 target = d
                 break
         if target is None:
             available = ", ".join(sorted(
-                parse_class(os.path.join(d, [f for f in os.listdir(d) if f.startswith('AOC.')][0]))["name"]
+                parse_agent_class(os.path.join(d, [f for f in os.listdir(d) if f.startswith('AOC.')][0]))["name"]
                 for d in agents if [f for f in os.listdir(d) if f.startswith('AOC.')]))
-            print(f"❌ 未找到 agent `{args.agent}`。可用: {available}", file=sys.stderr)
+            print(f"❌ Agent `{args.agent}` not found. Available: {available}", file=sys.stderr)
             sys.exit(1)
         agent = parse_agent(target)
         if args.section:
@@ -849,20 +1066,24 @@ def main():
         else:
             md = render_agent(agent)
     else:
-        # 全部 agent
+        # All global Java classes + all agents
         sections = []
+        classes_section = render_java_classes([parse_java_class(p) for p in classes])
+        if classes_section:
+            sections.append(classes_section)
         for d in agents:
             agent = parse_agent(d)
             sections.append(render_agent(agent))
-        header = [f"# {os.path.basename(model_dir.rstrip('/'))} — 模型语义参考",
-                  f"> 自动生成: {datetime.date.today().isoformat()}  |  来源: `_alp/` 目录  |  剥离了 Id/坐标/UI 配置等噪音"]
+        header = [f"# {os.path.basename(model_dir.rstrip('/'))} — Model semantic reference",
+                  f"> Auto-generated: {datetime.date.today().isoformat()}  |  Source: `_alp/` directory  |  "
+                  f"Noise such as Id/coordinates/UI config has been stripped out"]
         md = "\n\n".join(header + sections)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(md + "\n")
         if not args.quiet:
-            print(f"✅ 已写入 {args.output}")
+            print(f"✅ Written to {args.output}")
     else:
         print(md)
 

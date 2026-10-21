@@ -1,142 +1,201 @@
 ---
 name: model-reader
 description: >-
-  解析 AnyLogic 模型 _alp/ 目录下的 XML 源码，输出语义化 Markdown，
-  剥离 Id/坐标/Label/UI 配置等展示性噪音。用 Python 脚本 xml2md.py 自动提取
-  变量、参数、集合、函数（含 Java 函数体）、嵌入对象（模块）、流程链、状态机、
-  事件、网络节点/路径。Use when the user asks to read, understand, explore, or
-  summarize an AnyLogic model's content, when they want to know what variables,
-  functions, statecharts, or embedded objects a model contains, or when they
-  mention "read the model", "模型内容", "XML 太乱", "看不懂 _alp", or similar.
+  Parses the XML source code under an AnyLogic model's `_alp/` directory into
+  semantic Markdown, stripping out presentational noise like Id/coordinates/
+  Label/UI config. Uses the Python script xml2md.py to automatically extract
+  agent class definitions, shared plain Java classes/records/enums,
+  variables, parameters, collections, functions (including Java function
+  bodies), embedded objects (modules), flowchart chains, statecharts,
+  synchronous step-event details, dynamic (schedulable-function) events,
+  events, and network nodes/paths. Use when the user asks to read,
+  understand, explore, or summarize an AnyLogic model's content, when they
+  want to know what variables, functions, statecharts, or embedded objects a
+  model contains, or when they mention "read the model", "what's in the
+  model", "the XML is a mess", "I can't make sense of _alp", or similar.
   Scope: any AnyLogic model directory inside this repo (experiment1/2/3, the
   UGV-WebSocket-FollowPath project, etc).
 ---
 
-# AnyLogic 模型语义读取器
+# AnyLogic Model Semantic Reader
 
-## 速查
+## Quick reference
 
-| 操作 | 命令 |
+| Action | Command |
 |---|---|
-| 模型结构总览 | `python xml2md.py "<模型目录>" --toc` |
-| 单个 agent 全量 | `python xml2md.py "<模型目录>" --agent Main` |
-| 单 agent 单部分 | `python xml2md.py "<模型目录>" --agent UGV --section statechart` |
-| 生成持久参考文档 | `python xml2md.py "<模型目录>" --output "<输出.md>"` |
+| Model structure overview | `python xml2md.py "<model_dir>" --toc` |
+| Full dump of one agent | `python xml2md.py "<model_dir>" --agent Main` |
+| One section of one agent | `python xml2md.py "<model_dir>" --agent UGV --section statechart` |
+| A shared plain Java class/record/enum | `python xml2md.py "<model_dir>" --class SomeUtilClass` |
+| Generate a persistent reference doc | `python xml2md.py "<model_dir>" --output "<output.md>"` |
 
-脚本位置：`.claude/skills/model-reader/xml2md.py`（Python 标准库，**零依赖，无需 venv**）
+Script location: `.claude/skills/model-reader/xml2md.py` (Python standard library, **zero dependencies, no venv needed**)
 
-## 为什么要用它（核心价值）
+## Why use it (the core value)
 
-AnyLogic 模型源码 `_alp/` 是 XML，**90% 是噪音**：
+An AnyLogic model's `_alp/` source is XML, and **90% of it is noise**:
 
 ```
 <Variable Class="PlainVariable">
-    <Id>1781674452943</Id>          ← 时间戳 ID，无意义
-    <Name><![CDATA[baseX]]></Name>  ← 语义 ✓
-    <X>-810</X><Y>150</Y>           ← 画布坐标
-    <Label><X>10</X><Y>0</Y></Label> ← 标签位置
-    <PublicFlag>false</PublicFlag>  ← 展示标志
+    <Id>1781674452943</Id>          ← timestamp-based ID, meaningless
+    <Name><![CDATA[baseX]]></Name>  ← semantic ✓
+    <X>-810</X><Y>150</Y>           ← canvas coordinates
+    <Label><X>10</X><Y>0</Y></Label> ← label position
+    <PublicFlag>false</PublicFlag>  ← display flag
     ...
-    <Type><![CDATA[double]]></Type> ← 语义 ✓
-    <InitialValue><Code>area.getX()</Code></InitialValue> ← 语义 ✓
+    <Type><![CDATA[double]]></Type> ← semantic ✓
+    <InitialValue><Code>area.getX()</Code></InitialValue> ← semantic ✓
 ```
 
-`Level.level.xml` 可高达 **15873 行**。直接用 Read 读 XML 是灾难。
-本 skill 用脚本剥离噪音，只输出语义核心。
+A `Level.level.xml` can run as long as **15,873 lines**. Reading the raw XML
+directly is a disaster. This skill uses the script to strip out the noise
+and output only the semantic core.
 
-## 输出结构（每个 agent）
+## Output structure
 
-| 部分 | 内容 |
+### Per agent
+
+| Section | Contents |
 |---|---|
-| `class` | 名称、类型（ENTITY/TRANSPORTER）、Import、启动代码 |
-| `variables` | 变量表（名称\|类型\|初始值\|说明） |
-| `params` | 参数表（名称\|类型\|默认值\|说明） |
-| `collections` | 集合表（名称\|集合类型\|初始化） |
-| `functions` | 函数签名 + **完整 Java 函数体**（经 `/*ALCODESTART::id*/` 关联） |
-| `embedded` | 嵌入对象（名称\|类型\|有值的参数\|代码回调） |
-| `connectors` | 流程链（数据流方向 out → in） |
-| `statechart` | 状态机（状态表 + 转移表 + 初始指向，ID 引用已解析为名称） |
-| `events` | 事件（触发类型\|周期\|代码） |
-| `network` | 网络节点 + 路径表（SourceId/TargetId 已解析为节点名） |
+| `agent-class` | Name, type (ENTITY/TRANSPORTER), imports, startup code |
+| `variables` | Variable table (name\|type\|initial value\|description) |
+| `params` | Parameter table (name\|type\|default value\|description) |
+| `collections` | Collection table (name\|collection type\|initializer) |
+| `functions` | Function signatures + **full Java function bodies** (linked via `/*ALCODESTART::id*/`) |
+| `embedded` | Embedded objects (name\|type\|params that have a value\|code callbacks) |
+| `connectors` | Flowchart chain (data-flow direction out → in) |
+| `statechart` | Statechart (state table + transition table + initial pointers; Id references resolved to names) |
+| `steps` | Synchronous step-event details, where applicable (e.g. the on-enter / on-exit / timeout code carried by a flowchart step block) |
+| `dynamic-events` | Objects that act as a schedulable function: their arguments and code body |
+| `events` | Events (trigger type\|period\|code) |
+| `network` | Network nodes + path table (SourceId/TargetId resolved to node names) |
 
-## 决策树（每次查询时参考）
+### Top-level (not tied to a single agent)
+
+| Flag | Contents |
+|---|---|
+| `--class <name>` | A plain Java class/record/enum shared globally across the model (not an AnyLogic agent) — its fields/members and full source, noise stripped |
+
+## Decision tree (consult this on every query)
 
 ```
-用户想了解某 AnyLogic 模型 →
-  ┌──────────────────────────────┴──────────────────────────────┐
-  ↓ 不知道有哪些内容                                            ↓ 想看某个 agent 细节
-  python xml2md.py <模型目录> --toc            python xml2md.py <模型目录> --agent <名称>
-  （列出所有 agent + 文件清单 + 大小）               ↓
-                                                  想只看某部分？
-  ↓ 想一次性生成参考文档                           python xml2md.py <模型目录>
-  python xml2md.py <模型目录> --output <path>       --agent <名称> --section <section>
-  （生成/更新 CODE-REFERENCE.md）
+User wants to understand an AnyLogic model →
+  ┌─────────────────────────────────────────┴─────────────────────────────────────────┐
+  ↓ Doesn't know what's in it                                                          ↓ Wants details on a specific agent
+  python xml2md.py <model_dir> --toc                          python xml2md.py <model_dir> --agent <name>
+  (lists every agent + file listing + sizes)                                ↓
+                                                                    Only want one section?
+  ↓ Wants a shared, non-agent Java class/record/enum          python xml2md.py <model_dir>
+  python xml2md.py <model_dir> --class <name>                   --agent <name> --section <section>
+
+  ↓ Wants to generate a reference doc in one shot
+  python xml2md.py <model_dir> --output <path>
+  (creates/updates CODE-REFERENCE.md)
 ```
 
-## 命令详解
+## Command reference
 
-### 1. 模型结构总览
+### 1. Model structure overview
 
 ```bash
-python xml2md.py "<模型目录>" --toc
+python xml2md.py "<model_dir>" --toc
 ```
 
-输出所有 agent 名称、类型、目录下的文件清单及大小。**先跑这个**了解模型全貌。
+Outputs every agent's name, type, and the file listing (with sizes) in its
+directory. **Run this first** to get the lay of the land.
 
-### 2. 查看单个 agent
+### 2. Look at a single agent
 
 ```bash
-# 全量（所有部分依次输出）
-python xml2md.py "<模型目录>" --agent Main
+# Full dump (every section, in order)
+python xml2md.py "<model_dir>" --agent Main
 
-# 只看状态机（省 token）
-python xml2md.py "<模型目录>" --agent UGV --section statechart
+# Just the variables
+python xml2md.py "<model_dir>" --agent Main --section variables
 
-# 只看变量
-python xml2md.py "<模型目录>" --agent Main --section variables
+# Just the embedded objects (module configuration)
+python xml2md.py "<model_dir>" --agent Main --section embedded
 
-# 只看嵌入对象（模块配置）
-python xml2md.py "<模型目录>" --agent Main --section embedded
+# Just the synchronous step-event details
+python xml2md.py "<model_dir>" --agent Main --section steps
+
+# Just the schedulable-function (dynamic event) objects
+python xml2md.py "<model_dir>" --agent Main --section dynamic-events
 ```
 
-`--agent` 接受 agent 名称或目录名（不区分大小写）。
+`--agent` accepts either the agent's name or its directory name (case-insensitive).
 
-### 3. 生成持久参考文档
+### 3. Look at a shared, non-agent Java class
 
 ```bash
-python xml2md.py "<模型目录>" --output "<模型目录>/CODE-REFERENCE.md"
+python xml2md.py "<model_dir>" --class SomeUtilClass
 ```
 
-生成整个模型的语义参考文档，可入库长期引用。**模型更新后重新生成**即可，
-永远与源码一致。
+Use `--class` for plain Java classes, records, and enums that live outside
+any agent and are shared globally across the model (utility classes, DTOs,
+enum types), as opposed to `--agent` for AnyLogic agent types.
 
-## 常见问题定位技巧
+### 4. Generate a persistent reference document
 
-| 想找什么 | 命令 |
+```bash
+python xml2md.py "<model_dir>" --output "<model_dir>/CODE-REFERENCE.md"
+```
+
+Produces a full semantic reference document for the entire model, suitable
+for committing to the repo for long-term reference. **Regenerate it after
+the model changes** and it will always stay in sync with the source.
+
+## Quick lookup patterns
+
+| Looking for | Command |
 |---|---|
-| "Main 有哪些变量？" | `--agent Main --section variables` |
-| "UGV 状态机怎么跳转？" | `--agent UGV --section statechart` |
-| "某个 fleet 配置了什么？" | `--agent Main --section embedded`（找 TransporterFleet） |
-| "wafer 在哪些块之间流转？" | `--agent Main --section connectors` |
-| "某个函数逻辑？" | `--agent Main --section functions`（含完整代码） |
-| "有哪些路径/节点？" | `--agent Main --section network` |
+| "What variables does Main have?" | `--agent Main --section variables` |
+| "What is a given population configured with?" | `--agent Main --section embedded` |
+| "Which blocks does a wafer flow between?" | `--agent Main --section connectors` |
+| "What does a given function do?" | `--agent Main --section functions` (includes the full code) |
+| "What runs during a synchronized step?" | `--agent Main --section steps` |
+| "What does this schedulable-function object do, and with what arguments?" | `--agent Main --section dynamic-events` |
+| "What's in this shared utility class/record/enum?" | `--class <name>` |
 
-## Token 优化规则
+## Token-optimization rules
 
-| 场景 | 策略 |
+| Scenario | Strategy |
 |---|---|
-| 了解模型全貌 | `--toc`（一次，几十行） |
-| 查特定内容 | 直接 `--agent X --section Y`，不读全量 |
-| 全 agent 全量 | 输出可能 2000+ 行，仅在需要完整参考时用 |
-| 函数代码很长 | `--section functions` 已有完整代码，无需再读 .java |
-| 网络节点太多 | `--section network` 会列出全部节点（experiment3 Main 有 200+），按需用 |
+| Getting the lay of the land | `--toc` (once, a few dozen lines) |
+| Looking up something specific | Go straight to `--agent X --section Y`, don't read the full dump |
+| Full dump of every agent | Can run 2,000+ lines — only use it when you need the complete reference |
+| Function code is long | `--section functions` already has the full code; no need to also read the .java file |
+| Too many network nodes | `--section network` lists every node (experiment3's Main has 200+) — use only as needed |
+| Steps/dynamic-events sections | Small and targeted by design — prefer them over the full agent dump when the question is specifically about step timing or a schedulable function |
 
-## 已知限制
+## Known limitations
 
-1. **嵌入对象只输出「有值的参数」** — 无 Value 的参数是默认未设置（AnyLogic 会自动填默认值），不输出。如需查看某参数的默认值含义，查 `anylogic-help` skill。
-2. **`--output` 是覆盖写** — 会覆盖同路径已有文件，生成前确认路径。
-3. **网络节点坐标是画布像素** — 语义参考用；如需换算现实坐标，参考模型内坐标系统函数（如 `simToReal`）。
-4. **函数体只提取 `/*ALCODESTART::<数字id>*/` 块** — 若源码改用了纯命名标记（无数字 id），该函数 body 为空，需要直接读 .java。当前 experiment1/2/3 均使用数字 id，不受影响。
-5. **状态机转移的 Condition 显示在「条件/消息」列** — message 触发时显示 filter+消息；timeout 触发时显示超时值；可能不同时全显。
-6. **`--toc` 不解析 XML 内容** — 只列文件大小，不解析（快速）。要语义信息需 `--agent`。
-7. **流程链方向按数据流（out → in）渲染** — 与 Connector 物理连接方向相反。若看到 `A.in → B.out`，说明 B 块连到了 A 块下游。
+1. **Embedded objects only output "parameters that have a value"** — parameters
+   with no Value are unset defaults (AnyLogic fills them in automatically) and
+   are not output. To look up what a parameter's default actually means, check
+   the `anylogic-help` skill.
+2. **`--output` overwrites**  — it overwrites any existing file at the same
+   path; confirm the path before generating.
+3. **Network node coordinates are canvas pixels** — meant for semantic
+   reference; to convert to real-world coordinates, consult the model's own
+   coordinate-conversion functions (e.g. `simToReal`).
+4. **Function bodies are only extracted from `/*ALCODESTART::<numeric id>*/`
+   blocks** — if the source instead uses a purely named marker (no numeric
+   id), that function's body will come back empty and you'll need to read the
+   .java file directly. experiment1/2/3 all currently use numeric ids, so
+   this isn't an issue there.
+5. **A statechart transition's Condition is shown in the "Condition/Message"
+   column** — on a message trigger it shows filter+message; on a timeout
+   trigger it shows the timeout value; both may not be shown at once.
+6. **`--toc` does not parse XML content** — it only lists file sizes, not
+   parsed content (fast). You need `--agent` for semantic information.
+7. **Flowchart-chain direction is rendered as data flow (out → in)** — this is
+   the reverse of the Connector's physical connection direction. If you see
+   `A.in → B.out`, that means block B is physically connected downstream of
+   block A.
+8. **The `steps` section only applies where a block exposes synchronous
+   entry/exit/timeout code** — ordinary blocks with no such code produce
+   nothing here.
+9. **The `dynamic-events` section only lists objects explicitly configured as
+   a schedulable function** — events triggered the normal way (message,
+   condition, cyclic, etc.) remain under `events`.
